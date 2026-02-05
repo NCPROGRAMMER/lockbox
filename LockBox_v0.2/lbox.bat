@@ -1,0 +1,1 @@
+@"C:\Users\verti\Documents\LockBox\LockBox_v0.2\venv\Scripts\python.exe" "C:\Users\verti\Documents\LockBox\LockBox_v0.2\src\lbox.py" %*
