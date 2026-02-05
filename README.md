@@ -1,6 +1,6 @@
 # 🔒 LockBox Create Demo (Web + Redis)
 
-This demo shows how to run a simple **Flask web application backed by Redis** using **LockBox Create** — a Docker-style compose workflow that runs on LockBox’s isolated Alpine-based containers.
+This demo shows how to run a **Flask web application backed by Redis** using **LockBox Create** — a Docker-style compose workflow that runs on LockBox’s isolated Alpine-based containers.
 
 **No Docker daemon is required.**
 
@@ -107,6 +107,46 @@ This will stop and remove:
 - The web container
 - The Redis container
 - The auto-update monitor (if enabled)
+
+---
+
+## 🔧 LockBox Command Reference
+
+### `lbox` Core Commands
+
+| Command | Description |
+|------|------------|
+| `lbox build -t <tag> <path>` | Build an image from an `app.lbox` file |
+| `lbox run <image>` | Run a container from an image |
+| `lbox run --name <name>` | Run a container with a fixed name |
+| `lbox run -p HOST:CONT` | Publish a port |
+| `lbox run -v HOST:CONT` | Bind-mount a volume |
+| `lbox run -e VAR=value` | Set environment variables |
+| `lbox run -d` | Run container in detached mode |
+| `lbox stop <id|name>` | Stop a running container |
+| `lbox rm <id|name>` | Remove a container |
+| `lbox exec <id|name> "<cmd>"` | Execute a command inside a container |
+| `lbox logs <id|name>` | Show container logs |
+| `lbox logs -f <id|name>` | Follow container logs |
+| `lbox ps` | List running containers |
+| `lbox images` | List available images |
+
+---
+
+### `lbox create` (Compose-style)
+
+| Command | Description |
+|------|------------|
+| `lbox create up` | Build and start all services |
+| `lbox create up -d` | Start services in detached mode |
+| `lbox create down` | Stop and remove all services |
+| `lbox create up -f file.yml` | Use a custom compose file |
+
+`lbox create` automatically:
+- Builds missing images
+- Starts services in dependency order
+- Applies ports, volumes, and environment variables
+- Optionally launches the auto-update monitor
 
 ---
 
