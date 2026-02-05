@@ -1,0 +1,5 @@
+BOX_BASE alpine
+# Actually install the Redis Server software
+BOX_EXEC apk add --no-cache redis
+# Run Redis (disable protected mode so web app can reach it)
+BOX_START ["redis-server", "--protected-mode", "no"]
