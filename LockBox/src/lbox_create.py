@@ -62,8 +62,8 @@ def register_create_commands(
     list_project_containers,
     remove_image_artifacts,
     get_container_ip,
-    is_windows_admin,
-    relaunch_self_as_admin,
+    is_windows_admin=None,
+    relaunch_self_as_admin=None,
 ):
     @cli.group()
     def create():
@@ -81,7 +81,13 @@ def register_create_commands(
         if force_recreate and no_recreate:
             raise click.UsageError("--force-recreate and --no-recreate cannot be used together.")
 
-        if service and is_windows and not is_windows_admin():
+        if (
+            service
+            and is_windows
+            and callable(is_windows_admin)
+            and callable(relaunch_self_as_admin)
+            and not is_windows_admin()
+        ):
             print("Requesting Administrator privileges for --service...")
             relaunch_self_as_admin()
             return
