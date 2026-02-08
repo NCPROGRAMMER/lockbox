@@ -123,8 +123,13 @@ This will stop and remove:
 | `lbox run -v HOST:CONT` | Bind-mount a volume |
 | `lbox run -e VAR=value` | Set environment variables |
 | `lbox run -d` | Run container in detached mode |
+| `lbox run --restart <policy>` | Restart policy: `no`, `always`, `on-failure`, `unless-stopped` |
+| `lbox run -l key=value` | Attach labels to a container |
+| `lbox run --network <name>` | Store the desired network mode name |
 | `lbox stop <id|name>` | Stop a running container |
 | `lbox rm <id|name>` | Remove a container |
+| `lbox restart <id|name>` | Recreate and restart a container using saved config |
+| `lbox inspect <id|name>` | Show full container metadata as JSON |
 | `lbox exec <id|name> "<cmd>"` | Execute a command inside a container |
 | `lbox logs <id|name>` | Show container logs |
 | `lbox logs -f <id|name>` | Follow container logs |
