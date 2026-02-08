@@ -1,8 +1,14 @@
-# LockBox runtime artifacts
-containers/
-images/
-LockBox_v0.3/containers/
-LockBox_v0.3/images/
+# Runtime artifacts (ignore matching directories and all nested files anywhere in the repo)
+**/containers/
+**/containers/**
+**/images/
+**/images/**
+**/venv/
+**/venv/**
+**/state/
+**/state/**
+**/logs/
+**/logs/**
 
 # Python artifacts
 __pycache__/
