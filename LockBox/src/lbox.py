@@ -16,6 +16,7 @@ import hashlib
 import urllib.request
 import re
 import shlex
+import ctypes
 from datetime import datetime
 from lbox_create import register_create_commands
 
@@ -81,6 +82,41 @@ def run_quiet(cmd_list):
         subprocess.check_call(cmd_list, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         return True
     except: return False
+
+def is_windows_admin():
+    if not IS_WINDOWS:
+        return True
+    try:
+        return bool(ctypes.windll.shell32.IsUserAnAdmin())
+    except Exception:
+        return False
+
+def _ps_quote(value):
+    return "'" + str(value).replace("'", "''") + "'"
+
+
+def relaunch_self_as_admin():
+    if not IS_WINDOWS:
+        return False
+
+    script = os.path.abspath(sys.argv[0])
+    argv = [script] + sys.argv[1:]
+    args_literal = ", ".join(_ps_quote(arg) for arg in argv)
+    ps_cmd = (
+        f"$p = Start-Process -FilePath {_ps_quote(sys.executable)} "
+        f"-ArgumentList @({args_literal}) -Verb RunAs -PassThru -Wait; "
+        "exit $p.ExitCode"
+    )
+
+    try:
+        rc = subprocess.call(['powershell', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', ps_cmd])
+    except Exception as e:
+        print(f"Error: Failed to request elevation ({e}).")
+        return False
+
+    if rc != 0:
+        print("Warning: Elevation was cancelled or failed. Service mode requires Administrator privileges.")
+    return True
 
 def check_port_free(port):
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -200,6 +236,9 @@ def _register_container_service(state):
 
     try:
         if IS_WINDOWS:
+            if not is_windows_admin():
+                print(f"Warning: Windows service mode requires an elevated terminal (Admin). Service '{service_name}' not created.")
+                return False
             create_cmd = f'"{python_exe}" "{script}" internal-daemon "{cid}"'
             exists = subprocess.call(['sc.exe', 'query', service_name], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL) == 0
             if not exists:
@@ -216,7 +255,6 @@ def _register_container_service(state):
                             print(f"Warning: Windows service mode requires an elevated terminal (Admin). Service '{service_name}' not created.")
                         else:
                             print(f"Warning: Could not create Windows service '{service_name}': {err_text}")
-
                     else:
                         print(f"Warning: Could not create Windows service '{service_name}'.")
                     return False
@@ -1130,6 +1168,11 @@ def build(path, t):
 @click.option('--service/--no-service', default=False, help='Register container as a host-managed service.')
 @click.argument('cmd', required=False)
 def run(image, name, port, volume, env, detach, restart, label, network, service, cmd):
+    if service and IS_WINDOWS and not is_windows_admin():
+        print("Requesting Administrator privileges for --service...")
+        relaunch_self_as_admin()
+        return
+
     labels = parse_env_entries(label)
     eng.run(image, name, port, volume, env, detach, cmd, restart_policy=restart, labels=labels, network=network, as_service=service)
 
@@ -1212,6 +1255,8 @@ create = register_create_commands(
     list_project_containers,
     remove_image_artifacts,
     get_container_ip,
+    is_windows_admin,
+    relaunch_self_as_admin,
 )
 
 for c in [build, run, stop, restart, inspect, rm, exec, ps, images, logs, internal_daemon, monitor_daemon]:

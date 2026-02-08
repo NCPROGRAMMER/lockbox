@@ -62,6 +62,8 @@ def register_create_commands(
     list_project_containers,
     remove_image_artifacts,
     get_container_ip,
+    is_windows_admin,
+    relaunch_self_as_admin,
 ):
     @cli.group()
     def create():
@@ -78,6 +80,11 @@ def register_create_commands(
     def up(file, detach, service, force_recreate, no_recreate, build, remove_orphans):
         if force_recreate and no_recreate:
             raise click.UsageError("--force-recreate and --no-recreate cannot be used together.")
+
+        if service and is_windows and not is_windows_admin():
+            print("Requesting Administrator privileges for --service...")
+            relaunch_self_as_admin()
+            return
 
         if not os.path.exists(file):
             return print("YAML file not found.")
