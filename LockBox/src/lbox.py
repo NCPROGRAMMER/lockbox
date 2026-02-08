@@ -77,6 +77,21 @@ def remove_state(cid):
         if os.path.exists(os.path.join(STATE_DIR, f"{cid}.json")): os.remove(os.path.join(STATE_DIR, f"{cid}.json"))
     except: pass
 
+def remove_service_artifacts_by_container_name(name):
+    state = load_state(name)
+    if state:
+        _remove_container_service(state)
+        return
+
+    placeholder = {
+        "id": name,
+        "name": name,
+        "service_enabled": True,
+        "service_name": None,
+        "service_platform": "windows-task" if IS_WINDOWS else "linux",
+    }
+    _remove_container_service(placeholder)
+
 def run_quiet(cmd_list):
     try:
         subprocess.check_call(cmd_list, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -1303,6 +1318,7 @@ create = register_create_commands(
     get_container_ip,
     is_windows_admin,
     relaunch_self_as_admin,
+    remove_service_artifacts_by_container_name,
 )
 
 for c in [build, run, stop, restart, inspect, rm, exec, ps, images, logs, internal_daemon, monitor_daemon]:
