@@ -72,7 +72,7 @@ def register_create_commands(
     @create.command()
     @click.option('--file', '-f', default='lockbox-create.yml')
     @click.option('--build/--no-build', default=True, show_default=True, help='Build services that define a build context before starting.')
-    @click.option('--detach/--no-detach', default=True, show_default=True, help='Run service containers in detached mode.')
+    @click.option('-d/-D', '--detach/--no-detach', default=True, show_default=True, help='Run service containers in detached mode.')
     @click.option('--remove-orphans', is_flag=True, help='Remove containers for this project that are not defined in the compose file.')
     @click.option('--no-recreate', is_flag=True, help='If containers already exist, do not recreate them.')
     @click.option('--force-recreate', is_flag=True, help='Recreate containers even if they already exist.')
