@@ -135,6 +135,7 @@ This will stop and remove:
 | `lbox run --restart <policy>` | Restart policy: `no`, `always`, `on-failure`, `unless-stopped` |
 | `lbox run -l key=value` | Attach labels to a container |
 | `lbox run --network <name>` | Store the desired network mode name |
+| `lbox run --service` | Register container as a host-managed service (systemd on Linux, Service Control Manager on Windows) |
 | `lbox stop <id|name>` | Stop a running container |
 | `lbox rm <id|name>` | Remove a container |
 | `lbox restart <id|name>` | Recreate and restart a container using saved config |
@@ -156,6 +157,7 @@ This will stop and remove:
 | `lbox create up --force-recreate` | Recreate running service containers |
 | `lbox create up --no-recreate` | Keep already running service containers |
 | `lbox create up --remove-orphans` | Remove project containers missing from compose file |
+| `lbox create up --service` | Run project service containers as host-managed services |
 | `lbox create down` | Stop and remove all services |
 | `lbox create down --rmi all` | Also remove all service images |
 | `lbox create down --rmi local` | Remove only images built from `build:` definitions |

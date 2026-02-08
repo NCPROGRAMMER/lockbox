@@ -70,11 +70,12 @@ def register_create_commands(
     @create.command()
     @click.option('--file', '-f', default='lockbox-create.yml')
     @click.option('--detach', '-d', is_flag=True)
+    @click.option('--service/--no-service', default=False, help='Register each service container with the host service manager.')
     @click.option('--force-recreate', is_flag=True, help='Recreate containers even if they already exist.')
     @click.option('--no-recreate', is_flag=True, help='Do not recreate existing containers.')
     @click.option('--build/--no-build', default=True, help='Build images before starting containers.')
     @click.option('--remove-orphans', is_flag=True, help='Remove containers for this project that are not defined in the compose file.')
-    def up(file, detach, force_recreate, no_recreate, build, remove_orphans):
+    def up(file, detach, service, force_recreate, no_recreate, build, remove_orphans):
         if force_recreate and no_recreate:
             raise click.UsageError("--force-recreate and --no-recreate cannot be used together.")
 
@@ -141,7 +142,8 @@ def register_create_commands(
                     None,
                     restart_policy=svc.get('restart', 'no'),
                     labels=svc.get('labels', {}),
-                    network=svc.get('network', 'bridge')
+                    network=svc.get('network', 'bridge'),
+                    as_service=service or bool(svc.get('service', False))
                 )
                 print(f"Started {container_name}")
 
