@@ -1,2 +1,3 @@
 #!/bin/sh
-"C:\Users\verti\Documents\LockBox\LockBox_v0.2\venv\Scripts\python.exe" "C:\Users\verti\Documents\LockBox\LockBox_v0.2\src\lbox.py" "$@"
+DIR="$(cd "$(dirname "$0")" && pwd)"
+"$DIR/venv/Scripts/python.exe" "$DIR/src/lbox.py" "$@"
