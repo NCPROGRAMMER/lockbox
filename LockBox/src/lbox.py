@@ -92,6 +92,17 @@ def remove_service_artifacts_by_container_name(name):
     }
     _remove_container_service(placeholder)
 
+def _background_python_executable():
+    if not IS_WINDOWS:
+        return sys.executable
+
+    exe_dir = os.path.dirname(sys.executable)
+    pythonw = os.path.join(exe_dir, 'pythonw.exe')
+    if os.path.exists(pythonw):
+        return pythonw
+    return sys.executable
+
+
 def _windows_hidden_process_kwargs():
     if not IS_WINDOWS:
         return {}
@@ -226,7 +237,7 @@ def cleanup_container_resources(state):
 
 def spawn_internal_daemon(cid, log_handle=None):
     script = os.path.abspath(__file__)
-    python_exe = sys.executable
+    python_exe = _background_python_executable()
     startupinfo = None
     creationflags = 0
 
@@ -320,7 +331,7 @@ def _register_container_service(state):
 
     service_name = _container_service_name(state)
     script = os.path.abspath(__file__)
-    python_exe = sys.executable
+    python_exe = _background_python_executable()
 
     try:
         if IS_WINDOWS:

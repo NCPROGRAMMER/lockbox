@@ -7,6 +7,18 @@ import time
 import yaml
 
 
+def _background_python_executable():
+    exe = sys.executable
+    if os.name != 'nt':
+        return exe
+
+    exe_dir = os.path.dirname(exe)
+    pythonw = os.path.join(exe_dir, 'pythonw.exe')
+    if os.path.exists(pythonw):
+        return pythonw
+    return exe
+
+
 def _normalize_services(config):
     services = config.get('services', {})
     if services is None:
@@ -205,7 +217,7 @@ def register_create_commands(
                 monitor_log_path = os.path.join(state_dir, f"monitor_{project_name}.log")
                 monitor_log = open(monitor_log_path, "a")
                 p = subprocess.Popen(
-                    [sys.executable, sys.argv[0], "monitor-daemon", os.path.abspath(file), project_name],
+                    [_background_python_executable(), sys.argv[0], "monitor-daemon", os.path.abspath(file), project_name],
                     cwd=install_dir,
                     creationflags=creationflags,
                     startupinfo=startupinfo,
