@@ -233,6 +233,15 @@ def _windows_task_name(service_name):
     return f"LockBox\\{service_name}"
 
 
+def _legacy_windows_service_exists(service_name):
+    return subprocess.call(['sc.exe', 'query', service_name], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL) == 0
+
+
+def _remove_legacy_windows_service(service_name):
+    subprocess.call(['sc.exe', 'stop', service_name], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    subprocess.call(['sc.exe', 'delete', service_name], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
 def _register_windows_startup_task(service_name, command):
     task_name = _windows_task_name(service_name)
     create_proc = subprocess.run(
@@ -290,6 +299,8 @@ def _register_container_service(state):
                 return False
 
             create_cmd = _windows_service_command(script, python_exe, cid)
+            if _legacy_windows_service_exists(service_name):
+                _remove_legacy_windows_service(service_name)
             if not _register_windows_startup_task(service_name, create_cmd):
                 return False
         else:
@@ -337,7 +348,10 @@ def _stop_container_service(state):
     service_name = state.get('service_name') or _container_service_name(state)
     try:
         if IS_WINDOWS:
-            _stop_windows_startup_task(service_name)
+            if state.get('service_platform') == 'windows':
+                subprocess.call(['sc.exe', 'stop', service_name], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            else:
+                _stop_windows_startup_task(service_name)
         else:
             subprocess.call(['systemctl', 'stop', f"{service_name}.service"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except Exception:
@@ -351,8 +365,11 @@ def _remove_container_service(state):
     service_name = state.get('service_name') or _container_service_name(state)
     try:
         if IS_WINDOWS:
-            _stop_windows_startup_task(service_name)
-            _remove_windows_startup_task(service_name)
+            if state.get('service_platform') == 'windows':
+                _remove_legacy_windows_service(service_name)
+            else:
+                _stop_windows_startup_task(service_name)
+                _remove_windows_startup_task(service_name)
         else:
             unit_name = f"{service_name}.service"
             unit_path = os.path.join('/etc/systemd/system', unit_name)
