@@ -77,9 +77,47 @@ def remove_state(cid):
         if os.path.exists(os.path.join(STATE_DIR, f"{cid}.json")): os.remove(os.path.join(STATE_DIR, f"{cid}.json"))
     except: pass
 
+def remove_service_artifacts_by_container_name(name):
+    state = load_state(name)
+    if state:
+        _remove_container_service(state)
+        return
+
+    placeholder = {
+        "id": name,
+        "name": name,
+        "service_enabled": True,
+        "service_name": None,
+        "service_platform": "windows-task" if IS_WINDOWS else "linux",
+    }
+    _remove_container_service(placeholder)
+
+def _background_python_executable():
+    if not IS_WINDOWS:
+        return sys.executable
+
+    exe_dir = os.path.dirname(sys.executable)
+    pythonw = os.path.join(exe_dir, 'pythonw.exe')
+    if os.path.exists(pythonw):
+        return pythonw
+    return sys.executable
+
+
+def _windows_hidden_process_kwargs():
+    if not IS_WINDOWS:
+        return {}
+
+    startupinfo = subprocess.STARTUPINFO()
+    startupinfo.dwFlags |= 1
+    startupinfo.wShowWindow = 0
+    return {
+        "startupinfo": startupinfo,
+        "creationflags": 0x08000000,
+    }
+
 def run_quiet(cmd_list):
     try:
-        subprocess.check_call(cmd_list, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.check_call(cmd_list, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, **_windows_hidden_process_kwargs())
         return True
     except: return False
 
@@ -199,7 +237,7 @@ def cleanup_container_resources(state):
 
 def spawn_internal_daemon(cid, log_handle=None):
     script = os.path.abspath(__file__)
-    python_exe = sys.executable
+    python_exe = _background_python_executable()
     startupinfo = None
     creationflags = 0
 
@@ -207,7 +245,7 @@ def spawn_internal_daemon(cid, log_handle=None):
         startupinfo = subprocess.STARTUPINFO()
         startupinfo.dwFlags |= 1
         startupinfo.wShowWindow = 0
-        creationflags = 0x00000200
+        creationflags = 0x00000008 | 0x00000200 | 0x08000000
 
     proc = subprocess.Popen(
         [python_exe, script, "internal-daemon", cid],
@@ -235,7 +273,11 @@ def _container_service_name(state):
 
 
 def _windows_service_command(script, python_exe, cid):
-    return f'"{python_exe}" "{script}" internal-daemon "{cid}"'
+    logs_file = os.path.join(LOGS_DIR, f"{cid}.log")
+    return (
+        f'cmd.exe /d /c ""{python_exe}" "{script}" internal-daemon "{cid}" '
+        f'>> "{logs_file}" 2>&1"'
+    )
 
 
 def _windows_task_name(service_name):
@@ -269,20 +311,6 @@ def _register_windows_startup_task(service_name, command):
             _log_windows_service_error(f"Create failed for '{task_name}' with no output.")
         return False
 
-    run_proc = subprocess.run(
-        ['schtasks', '/Run', '/TN', task_name],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-    )
-    if run_proc.returncode != 0:
-        err_text = (run_proc.stderr or run_proc.stdout or '').strip()
-        if err_text:
-            print(f"Warning: Created task '{task_name}' but could not start it immediately: {err_text}")
-            _log_windows_service_error(f"Run failed for '{task_name}': {err_text}")
-        else:
-            print(f"Warning: Created task '{task_name}' but could not start it immediately.")
-            _log_windows_service_error(f"Run failed for '{task_name}' with no output.")
     return True
 
 
@@ -303,7 +331,7 @@ def _register_container_service(state):
 
     service_name = _container_service_name(state)
     script = os.path.abspath(__file__)
-    python_exe = sys.executable
+    python_exe = _background_python_executable()
 
     try:
         if IS_WINDOWS:
@@ -707,11 +735,13 @@ class WindowsEngine:
             log_handle.flush()
 
             if as_service:
-                if not _register_container_service(state):
+                service_registered = _register_container_service(state)
+                if not service_registered:
                     print("Warning: Falling back to non-service mode.")
                     state['service_enabled'] = False
                     state['service_name'] = None
                     save_state(cid, state)
+                if IS_WINDOWS or not service_registered:
                     spawn_internal_daemon(cid, log_handle)
             else:
                 spawn_internal_daemon(cid, log_handle)
@@ -923,11 +953,13 @@ class LinuxEngine:
             lf.write(f"--- Init {cid} ---\\n"); lf.flush()
 
             if as_service:
-                if not _register_container_service(state):
+                service_registered = _register_container_service(state)
+                if not service_registered:
                     print("Warning: Falling back to non-service mode.")
                     state['service_enabled'] = False
                     state['service_name'] = None
                     save_state(cid, state)
+                if IS_WINDOWS or not service_registered:
                     spawn_internal_daemon(cid, lf)
             else:
                 spawn_internal_daemon(cid, lf)
@@ -1028,14 +1060,14 @@ def internal_daemon(cid):
                     wh = os.path.abspath(h).replace('\\','/')
                     drive, rest = os.path.splitdrive(wh)
                     if drive: wh = f"/mnt/{drive[0].lower()}{rest}"
-                    subprocess.call(['wsl', '-d', cid, 'sh', '-c', f'mkdir -p {c} && mount --bind "{wh}" "{c}"'])
+                    subprocess.call(['wsl', '-d', cid, 'sh', '-c', f'mkdir -p {c} && mount --bind "{wh}" "{c}"'], **_windows_hidden_process_kwargs())
 
                 for e in s.get('envs', []):
-                    subprocess.call(['wsl', '-d', cid, 'sh', '-c', f"echo 'export {e}' >> /etc/profile"])
+                    subprocess.call(['wsl', '-d', cid, 'sh', '-c', f"echo 'export {e}' >> /etc/profile"], **_windows_hidden_process_kwargs())
 
-                subprocess.call(['wsl', '-d', cid, 'sh', '-c', 'echo "nameserver 8.8.8.8" > /etc/resolv.conf'])
+                subprocess.call(['wsl', '-d', cid, 'sh', '-c', 'echo "nameserver 8.8.8.8" > /etc/resolv.conf'], **_windows_hidden_process_kwargs())
                 full_cmd = f"cd {workdir} && {cmd}"
-                exit_code = subprocess.call(['wsl', '-d', cid, 'sh', '-c', full_cmd])
+                exit_code = subprocess.call(['wsl', '-d', cid, 'sh', '-c', full_cmd], **_windows_hidden_process_kwargs())
             else:
                 mp = []
                 for v in s.get('volumes', []):
@@ -1303,6 +1335,7 @@ create = register_create_commands(
     get_container_ip,
     is_windows_admin,
     relaunch_self_as_admin,
+    remove_service_artifacts_by_container_name,
 )
 
 for c in [build, run, stop, restart, inspect, rm, exec, ps, images, logs, internal_daemon, monitor_daemon]:
