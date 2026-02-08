@@ -15,6 +15,7 @@ import yaml
 import hashlib
 import urllib.request
 import re
+import shlex
 from datetime import datetime
 from lbox_create import register_create_commands
 
@@ -38,16 +39,31 @@ for d in [IMAGES_DIR, CONTAINERS_DIR, STATE_DIR, LOGS_DIR]:
 def save_state(cid, data):
     with open(os.path.join(STATE_DIR, f"{cid}.json"), 'w') as f: json.dump(data, f, indent=4)
 
+
+def iter_states():
+    """Yield container states from STATE_DIR, skipping malformed files."""
+    for entry in os.scandir(STATE_DIR):
+        if not entry.is_file() or not entry.name.endswith('.json'):
+            continue
+        try:
+            with open(entry.path) as f:
+                yield json.load(f)
+        except Exception:
+            continue
+
+
 def load_state(identifier):
     path = os.path.join(STATE_DIR, f"{identifier}.json")
     if os.path.exists(path):
-        with open(path) as f: return json.load(f)
-    for f in os.listdir(STATE_DIR):
-        if f.endswith(".json"):
-            try:
-                data = json.load(open(os.path.join(STATE_DIR, f)))
-                if data.get('name') == identifier: return data
-            except: continue
+        try:
+            with open(path) as f:
+                return json.load(f)
+        except Exception:
+            return None
+
+    for data in iter_states():
+        if data.get('name') == identifier:
+            return data
     return None
 
 def get_id_by_name(name):
@@ -107,14 +123,7 @@ def remove_image_artifacts(tag):
 def list_project_containers(project_name):
     prefix = f"{project_name}_"
     names = []
-    for state_file in os.listdir(STATE_DIR):
-        if not state_file.endswith('.json'):
-            continue
-        try:
-            with open(os.path.join(STATE_DIR, state_file)) as f:
-                state = json.load(f)
-        except Exception:
-            continue
+    for state in iter_states():
         name = state.get('name')
         if name and name.startswith(prefix):
             names.append(name)
@@ -123,6 +132,8 @@ def list_project_containers(project_name):
 def cleanup_container_resources(state):
     if not state:
         return
+
+    _remove_container_service(state)
 
     cid = state.get('id')
     root = state.get('root')
@@ -164,6 +175,110 @@ def spawn_internal_daemon(cid, log_handle=None):
         stderr=subprocess.STDOUT if log_handle else subprocess.DEVNULL
     )
     return proc
+
+def _normalize_service_name(value):
+    cleaned = re.sub(r'[^A-Za-z0-9_.-]+', '-', str(value or '').strip())
+    cleaned = cleaned.strip('-_.')
+    return cleaned or f"lockbox-{uuid.uuid4().hex[:8]}"
+
+
+def _container_service_name(state):
+    if state.get('service_name'):
+        return state['service_name']
+    base = state.get('name') or state.get('id')
+    return f"lockbox-{_normalize_service_name(base)}"
+
+
+def _register_container_service(state):
+    cid = state.get('id')
+    if not cid:
+        return False
+
+    service_name = _container_service_name(state)
+    script = os.path.abspath(__file__)
+    python_exe = sys.executable
+
+    try:
+        if IS_WINDOWS:
+            quoted = f'"{python_exe}" "{script}" internal-daemon {cid}'
+            exists = subprocess.call(['sc', 'query', service_name], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL) == 0
+            if not exists:
+                rc = subprocess.call(['sc', 'create', service_name, f'binPath= {quoted}', 'start= auto'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                if rc != 0:
+                    print(f"Warning: Could not create Windows service '{service_name}'.")
+                    return False
+            subprocess.call(['sc', 'start', service_name], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        else:
+            unit_name = f"{service_name}.service"
+            unit_path = os.path.join('/etc/systemd/system', unit_name)
+            exec_start = f"{shlex.quote(python_exe)} {shlex.quote(script)} internal-daemon {shlex.quote(cid)}"
+            unit_contents = (
+                "[Unit]\n"
+                f"Description=LockBox container {state.get('name') or cid}\n"
+                "After=network.target\n\n"
+                "[Service]\n"
+                "Type=simple\n"
+                f"WorkingDirectory={INSTALL_DIR}\n"
+                f"ExecStart={exec_start}\n"
+                "Restart=always\n"
+                "RestartSec=2\n\n"
+                "[Install]\n"
+                "WantedBy=multi-user.target\n"
+            )
+            with open(unit_path, 'w') as f:
+                f.write(unit_contents)
+
+            if subprocess.call(['systemctl', 'daemon-reload']) != 0:
+                print(f"Warning: Failed to reload systemd for service '{unit_name}'.")
+                return False
+            if subprocess.call(['systemctl', 'enable', '--now', unit_name]) != 0:
+                print(f"Warning: Failed to enable/start service '{unit_name}'.")
+                return False
+
+        state['service_enabled'] = True
+        state['service_name'] = service_name
+        state['service_platform'] = 'windows' if IS_WINDOWS else 'linux'
+        save_state(cid, state)
+        print(f"Service mode enabled: {service_name}")
+        return True
+    except Exception as e:
+        print(f"Warning: Unable to configure service mode ({e}).")
+        return False
+
+
+def _stop_container_service(state):
+    if not state or not state.get('service_enabled'):
+        return
+
+    service_name = state.get('service_name') or _container_service_name(state)
+    try:
+        if IS_WINDOWS:
+            subprocess.call(['sc', 'stop', service_name], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        else:
+            subprocess.call(['systemctl', 'stop', f"{service_name}.service"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception:
+        pass
+
+
+def _remove_container_service(state):
+    if not state or not state.get('service_enabled'):
+        return
+
+    service_name = state.get('service_name') or _container_service_name(state)
+    try:
+        if IS_WINDOWS:
+            subprocess.call(['sc', 'stop', service_name], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            subprocess.call(['sc', 'delete', service_name], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        else:
+            unit_name = f"{service_name}.service"
+            unit_path = os.path.join('/etc/systemd/system', unit_name)
+            subprocess.call(['systemctl', 'disable', '--now', unit_name], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            if os.path.exists(unit_path):
+                os.remove(unit_path)
+            subprocess.call(['systemctl', 'daemon-reload'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception:
+        pass
+
 
 # ==========================================
 # ROBUST NETWORKING (FIXED FOR WSL 172.x)
@@ -420,7 +535,7 @@ class WindowsEngine:
             run_quiet(['wsl', '--unregister', bid])
             shutil.rmtree(root, ignore_errors=True)
 
-    def run(self, image, name, ports, volumes, envs, detach, cmd, restart_policy="no", labels=None, network="bridge"):
+    def run(self, image, name, ports, volumes, envs, detach, cmd, restart_policy="no", labels=None, network="bridge", as_service=False):
         self.check_reqs()
         if name and get_id_by_name(name): 
             print(f"Note: Container '{name}' already exists. Skipping.")
@@ -459,7 +574,9 @@ class WindowsEngine:
                 "restart": restart_policy or "no",
                 "restart_count": 0,
                 "labels": labels or {},
-                "network": network or "bridge"
+                "network": network or "bridge",
+                "service_enabled": bool(as_service),
+                "service_name": None
             }
             save_state(cid, state)
 
@@ -468,7 +585,15 @@ class WindowsEngine:
             log_handle.write(f"--- Init {name or cid} ---\n")
             log_handle.flush()
 
-            spawn_internal_daemon(cid, log_handle)
+            if as_service:
+                if not _register_container_service(state):
+                    print("Warning: Falling back to non-service mode.")
+                    state['service_enabled'] = False
+                    state['service_name'] = None
+                    save_state(cid, state)
+                    spawn_internal_daemon(cid, log_handle)
+            else:
+                spawn_internal_daemon(cid, log_handle)
 
             print(f"Starting {name or cid}...", end="", flush=True)
             for _ in range(240): 
@@ -502,6 +627,7 @@ class WindowsEngine:
         s = load_state(ident)
         if not s: return print("Not found.")
         cid = s['id']
+        _stop_container_service(s)
         run_quiet(['wsl', '--terminate', cid])
         s['status'] = 'exited'
         save_state(cid, s)
@@ -512,6 +638,7 @@ class WindowsEngine:
         if not s: return print("Not found.")
         cid = s['id']
         print(f"Removing {cid}...")
+        _remove_container_service(s)
         self.stop(ident)
         time.sleep(1)
         for i in range(5):
@@ -551,15 +678,11 @@ class WindowsEngine:
 
     def ps(self):
         print(f"{'CONTAINER ID':<15} {'NAME':<15} {'IMAGE':<15} {'STATUS':<10} {'PORTS'}")
-        for f in os.listdir(STATE_DIR):
-            if f.endswith(".json"):
-                try:
-                    d = json.load(open(os.path.join(STATE_DIR, f)))
-                    if d.get('status') == 'running':
-                        name = d.get('name') or "-"
-                        ports = ",".join(d.get('ports', []))
-                        print(f"{d['id']:<15} {name:<15} {d['image']:<15} {d['status']:<10} {ports}")
-                except: pass
+        for d in iter_states():
+            if d.get('status') == 'running':
+                name = d.get('name') or "-"
+                ports = ",".join(d.get('ports', []))
+                print(f"{d['id']:<15} {name:<15} {d['image']:<15} {d['status']:<10} {ports}")
 
     def inject_hosts(self, cid, hosts_map):
         """Updates /etc/hosts"""
@@ -634,7 +757,7 @@ class LinuxEngine:
         except Exception as e: print(f"Build Failed: {e}")
         finally: shutil.rmtree(root, ignore_errors=True)
 
-    def run(self, image, name, ports, volumes, envs, detach, cmd, restart_policy="no", labels=None, network="bridge"):
+    def run(self, image, name, ports, volumes, envs, detach, cmd, restart_policy="no", labels=None, network="bridge", as_service=False):
         self.check_reqs()
         if name and get_id_by_name(name): return print(f"Error: Name '{name}' taken.")
         for p in ports:
@@ -668,7 +791,9 @@ class LinuxEngine:
                 "restart": restart_policy or "no",
                 "restart_count": 0,
                 "labels": labels or {},
-                "network": network or "bridge"
+                "network": network or "bridge",
+                "service_enabled": bool(as_service),
+                "service_name": None
             }
             save_state(cid, state)
 
@@ -676,7 +801,15 @@ class LinuxEngine:
             lf = open(lp, 'a')
             lf.write(f"--- Init {cid} ---\\n"); lf.flush()
 
-            spawn_internal_daemon(cid, lf)
+            if as_service:
+                if not _register_container_service(state):
+                    print("Warning: Falling back to non-service mode.")
+                    state['service_enabled'] = False
+                    state['service_name'] = None
+                    save_state(cid, state)
+                    spawn_internal_daemon(cid, lf)
+            else:
+                spawn_internal_daemon(cid, lf)
 
             print("Starting...", end="", flush=True)
             for _ in range(40):
@@ -696,6 +829,7 @@ class LinuxEngine:
         s = load_state(ident)
         if not s: return
         cid = s['id']
+        _stop_container_service(s)
         s['status'] = 'exited'
         save_state(cid, s)
         print(f"Stopped {cid}")
@@ -703,6 +837,7 @@ class LinuxEngine:
     def rm(self, ident):
         s = load_state(ident)
         if not s: return
+        _remove_container_service(s)
         self.stop(ident)
         if 'mounts' in s:
             for m in s['mounts']: run_quiet(['umount', '-l', m])
@@ -725,13 +860,9 @@ class LinuxEngine:
 
     def ps(self):
         print(f"{'CONTAINER ID':<15} {'NAME':<15} {'IMAGE':<15} {'STATUS':<10} {'PORTS'}")
-        for f in os.listdir(STATE_DIR):
-            if f.endswith(".json"):
-                try:
-                    d = json.load(open(os.path.join(STATE_DIR, f)))
-                    if d.get('status') == 'running':
-                        print(f"{d['id']:<15} {d.get('name') or '-':<15} {d['image']:<15} {d['status']:<10} {','.join(d.get('ports',[]))}")
-                except: pass
+        for d in iter_states():
+            if d.get('status') == 'running':
+                print(f"{d['id']:<15} {d.get('name') or '-':<15} {d['image']:<15} {d['status']:<10} {','.join(d.get('ports',[]))}")
 
     def inject_hosts(self, cid, hosts_map):
         pass
@@ -959,10 +1090,11 @@ def build(path, t):
 @click.option('--restart', type=click.Choice(['no', 'always', 'on-failure', 'unless-stopped']), default='no')
 @click.option('--label', '-l', multiple=True, help='Set metadata labels key=value')
 @click.option('--network', default='bridge')
+@click.option('--service/--no-service', default=False, help='Register container as a host-managed service.')
 @click.argument('cmd', required=False)
-def run(image, name, port, volume, env, detach, restart, label, network, cmd):
+def run(image, name, port, volume, env, detach, restart, label, network, service, cmd):
     labels = parse_env_entries(label)
-    eng.run(image, name, port, volume, env, detach, cmd, restart_policy=restart, labels=labels, network=network)
+    eng.run(image, name, port, volume, env, detach, cmd, restart_policy=restart, labels=labels, network=network, as_service=service)
 
 @click.command()
 @click.argument('identifier')
@@ -982,7 +1114,8 @@ def restart(identifier):
         "command": s.get('command'),
         "restart": s.get('restart', 'no'),
         "labels": s.get('labels', {}),
-        "network": s.get('network', 'bridge')
+        "network": s.get('network', 'bridge'),
+        "service_enabled": s.get('service_enabled', False)
     }
 
     eng.rm(identifier)
@@ -996,7 +1129,8 @@ def restart(identifier):
         config['command'],
         restart_policy=config['restart'],
         labels=config['labels'],
-        network=config['network']
+        network=config['network'],
+        as_service=config['service_enabled']
     )
 
 @click.command()

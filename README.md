@@ -12,6 +12,9 @@ This demo shows how to run a **Flask web application backed by Redis** using **L
 - Running multiple services (web + redis) with `lockbox-create.yml`  
 - Port forwarding from containers to the host  
 - Absolute-path container startup (**required for LockBox v4.7+**)
+- Health endpoint (`/healthz`) for quick service checks
+- Redis host fallback logic for more reliable local runs
+- Redis client/host reuse to reduce per-request connection overhead
 
 ---
 
@@ -93,6 +96,12 @@ http://localhost:8080
 
 You should see a page showing a hit counter backed by Redis.
 
+Quick health check:
+
+```bash
+curl http://localhost:8080/healthz
+```
+
 ---
 
 ## 🛑 Stopping the Demo
@@ -126,6 +135,7 @@ This will stop and remove:
 | `lbox run --restart <policy>` | Restart policy: `no`, `always`, `on-failure`, `unless-stopped` |
 | `lbox run -l key=value` | Attach labels to a container |
 | `lbox run --network <name>` | Store the desired network mode name |
+| `lbox run --service` | Register container as a host-managed service (systemd on Linux, Service Control Manager on Windows) |
 | `lbox stop <id|name>` | Stop a running container |
 | `lbox rm <id|name>` | Remove a container |
 | `lbox restart <id|name>` | Recreate and restart a container using saved config |
@@ -147,6 +157,7 @@ This will stop and remove:
 | `lbox create up --force-recreate` | Recreate running service containers |
 | `lbox create up --no-recreate` | Keep already running service containers |
 | `lbox create up --remove-orphans` | Remove project containers missing from compose file |
+| `lbox create up --service` | Run project service containers as host-managed services |
 | `lbox create down` | Stop and remove all services |
 | `lbox create down --rmi all` | Also remove all service images |
 | `lbox create down --rmi local` | Remove only images built from `build:` definitions |

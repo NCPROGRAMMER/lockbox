@@ -7,6 +7,8 @@ services:
       - "8080:5000"           # Map host port 8080 to container 5000
     environment:
       - FLASK_ENV=development
+      - REDIS_HOST=127.0.0.1
+      - REDIS_PORT=6379
     
     # NEW FEATURE: Auto-Update
     # enabled: true (without URL) means "Watch local files for changes"

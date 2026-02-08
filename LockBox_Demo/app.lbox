@@ -21,4 +21,4 @@ BOX_EXEC pip install -r requirements.txt
 BOX_COPY . .
 
 # 5. Run
-BOX_START ["python", "app.py"]
+BOX_START ["/app/venv/bin/python", "/app/app.py"]
