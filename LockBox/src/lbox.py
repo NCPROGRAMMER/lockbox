@@ -222,7 +222,7 @@ def spawn_internal_daemon(cid, log_handle=None):
         startupinfo = subprocess.STARTUPINFO()
         startupinfo.dwFlags |= 1
         startupinfo.wShowWindow = 0
-        creationflags = 0x00000200
+        creationflags = 0x00000008 | 0x00000200
 
     proc = subprocess.Popen(
         [python_exe, script, "internal-daemon", cid],
