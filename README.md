@@ -14,6 +14,7 @@ This demo shows how to run a **Flask web application backed by Redis** using **L
 - Absolute-path container startup (**required for LockBox v4.7+**)
 - Health endpoint (`/healthz`) for quick service checks
 - Redis host fallback logic for more reliable local runs
+- Redis client/host reuse to reduce per-request connection overhead
 
 ---
 
