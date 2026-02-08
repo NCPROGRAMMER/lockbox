@@ -1179,7 +1179,14 @@ def monitor_daemon(config_path, project_name):
                         dest = os.path.join(IMAGES_DIR, f"{image_tag}.tar")
                         urllib.request.urlretrieve(url, dest)
                     else:
-                        subprocess.call([sys.executable, sys.argv[0], "build", "-t", image_tag, svc.get('build', '.')])
+                        subprocess.call([
+                            _background_python_executable(),
+                            sys.argv[0],
+                            "build",
+                            "-t",
+                            image_tag,
+                            svc.get('build', '.'),
+                        ], **_windows_hidden_process_kwargs())
 
                     eng.stop(container_name)
                     time.sleep(2) 
