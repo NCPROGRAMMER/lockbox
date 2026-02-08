@@ -297,7 +297,6 @@ def _register_container_service(state):
             if not is_windows_admin():
                 print(f"Warning: Windows service mode requires an elevated terminal (Admin). Service '{service_name}' not created.")
                 return False
-
             create_cmd = _windows_service_command(script, python_exe, cid)
             if _legacy_windows_service_exists(service_name):
                 _remove_legacy_windows_service(service_name)
