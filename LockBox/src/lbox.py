@@ -99,24 +99,33 @@ def relaunch_self_as_admin():
     if not IS_WINDOWS:
         return False
 
-    script = os.path.abspath(sys.argv[0])
+    script = os.path.abspath(__file__)
     argv = [script] + sys.argv[1:]
-    args_literal = ", ".join(_ps_quote(arg) for arg in argv)
-    ps_cmd = (
-        f"$p = Start-Process -FilePath {_ps_quote(sys.executable)} "
-        f"-ArgumentList @({args_literal}) -Verb RunAs -PassThru -Wait; "
-        "exit $p.ExitCode"
-    )
+    params = subprocess.list2cmdline(argv)
 
     try:
-        rc = subprocess.call(['powershell', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', ps_cmd])
+        rc = ctypes.windll.shell32.ShellExecuteW(None, 'runas', sys.executable, params, None, 1)
     except Exception as e:
         print(f"Error: Failed to request elevation ({e}).")
         return False
 
-    if rc != 0:
+    if rc <= 32:
         print("Warning: Elevation was cancelled or failed. Service mode requires Administrator privileges.")
+        return False
     return True
+
+
+def _log_windows_service_error(message):
+    if not IS_WINDOWS:
+        return
+
+    try:
+        ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        log_path = os.path.join(LOGS_DIR, 'windows_service_errors.log')
+        with open(log_path, 'a', encoding='utf-8') as f:
+            f.write(f"[{ts}] {message}\n")
+    except Exception:
+        pass
 
 def check_port_free(port):
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -254,8 +263,10 @@ def _register_windows_startup_task(service_name, command):
         err_text = (create_proc.stderr or create_proc.stdout or '').strip()
         if err_text:
             print(f"Warning: Could not create Windows startup task '{task_name}': {err_text}")
+            _log_windows_service_error(f"Create failed for '{task_name}': {err_text}")
         else:
             print(f"Warning: Could not create Windows startup task '{task_name}'.")
+            _log_windows_service_error(f"Create failed for '{task_name}' with no output.")
         return False
 
     run_proc = subprocess.run(
@@ -268,8 +279,10 @@ def _register_windows_startup_task(service_name, command):
         err_text = (run_proc.stderr or run_proc.stdout or '').strip()
         if err_text:
             print(f"Warning: Created task '{task_name}' but could not start it immediately: {err_text}")
+            _log_windows_service_error(f"Run failed for '{task_name}': {err_text}")
         else:
             print(f"Warning: Created task '{task_name}' but could not start it immediately.")
+            _log_windows_service_error(f"Run failed for '{task_name}' with no output.")
     return True
 
 
@@ -296,6 +309,9 @@ def _register_container_service(state):
         if IS_WINDOWS:
             if not is_windows_admin():
                 print(f"Warning: Windows service mode requires an elevated terminal (Admin). Service '{service_name}' not created.")
+                _log_windows_service_error(
+                    f"Service '{service_name}' not created for container '{cid}': elevation required."
+                )
                 return False
             create_cmd = _windows_service_command(script, python_exe, cid)
             if _legacy_windows_service_exists(service_name):
@@ -337,6 +353,9 @@ def _register_container_service(state):
         return True
     except Exception as e:
         print(f"Warning: Unable to configure service mode ({e}).")
+        _log_windows_service_error(
+            f"Service '{service_name}' mapping failed for container '{cid}': {e}"
+        )
         return False
 
 
