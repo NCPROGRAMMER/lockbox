@@ -239,7 +239,6 @@ def _register_container_service(state):
             if not is_windows_admin():
                 print(f"Warning: Windows service mode requires an elevated terminal (Admin). Service '{service_name}' not created.")
                 return False
-
             create_cmd = f'"{python_exe}" "{script}" internal-daemon "{cid}"'
             exists = subprocess.call(['sc.exe', 'query', service_name], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL) == 0
             if not exists:
