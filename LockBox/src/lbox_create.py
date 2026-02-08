@@ -62,6 +62,25 @@ def register_create_commands(
     list_project_containers,
     remove_image_artifacts,
     get_container_ip,
+    is_windows_admin,
+    relaunch_self_as_admin,
+):
+    @cli.group()
+    def create():
+        """Manage multi-container projects from lockbox-create.yml."""
+
+    @create.command()
+    @click.option('--file', '-f', default='lockbox-create.yml')
+    @click.option('--build/--no-build', default=True, show_default=True, help='Build services that define a build context before starting.')
+    @click.option('-d/-D', '--detach/--no-detach', default=True, show_default=True, help='Run service containers in detached mode.')
+    @click.option('--remove-orphans', is_flag=True, help='Remove containers for this project that are not defined in the compose file.')
+    @click.option('--no-recreate', is_flag=True, help='If containers already exist, do not recreate them.')
+    @click.option('--force-recreate', is_flag=True, help='Recreate containers even if they already exist.')
+    @click.option('--service', is_flag=True, help='Run containers as startup services (Windows requires admin).')
+    def up(file, build, detach, remove_orphans, no_recreate, force_recreate, service):
+        if no_recreate and force_recreate:
+            raise click.UsageError("--no-recreate and --force-recreate cannot be used together.")
+
         if service and is_windows and not is_windows_admin():
             print("Requesting Administrator privileges for --service...")
             relaunch_self_as_admin()
@@ -187,7 +206,7 @@ def register_create_commands(
                     cwd=install_dir,
                     creationflags=creationflags,
                     startupinfo=startupinfo,
-                    close_fds=True
+                    close_fds=True,
                 )
                 with open(pid_file, 'w') as f:
                     f.write(str(p.pid))
