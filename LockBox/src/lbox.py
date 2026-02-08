@@ -216,6 +216,7 @@ def _register_container_service(state):
                             print(f"Warning: Windows service mode requires an elevated terminal (Admin). Service '{service_name}' not created.")
                         else:
                             print(f"Warning: Could not create Windows service '{service_name}': {err_text}")
+
                     else:
                         print(f"Warning: Could not create Windows service '{service_name}'.")
                     return False
