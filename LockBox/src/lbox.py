@@ -38,16 +38,31 @@ for d in [IMAGES_DIR, CONTAINERS_DIR, STATE_DIR, LOGS_DIR]:
 def save_state(cid, data):
     with open(os.path.join(STATE_DIR, f"{cid}.json"), 'w') as f: json.dump(data, f, indent=4)
 
+
+def iter_states():
+    """Yield container states from STATE_DIR, skipping malformed files."""
+    for entry in os.scandir(STATE_DIR):
+        if not entry.is_file() or not entry.name.endswith('.json'):
+            continue
+        try:
+            with open(entry.path) as f:
+                yield json.load(f)
+        except Exception:
+            continue
+
+
 def load_state(identifier):
     path = os.path.join(STATE_DIR, f"{identifier}.json")
     if os.path.exists(path):
-        with open(path) as f: return json.load(f)
-    for f in os.listdir(STATE_DIR):
-        if f.endswith(".json"):
-            try:
-                data = json.load(open(os.path.join(STATE_DIR, f)))
-                if data.get('name') == identifier: return data
-            except: continue
+        try:
+            with open(path) as f:
+                return json.load(f)
+        except Exception:
+            return None
+
+    for data in iter_states():
+        if data.get('name') == identifier:
+            return data
     return None
 
 def get_id_by_name(name):
@@ -107,14 +122,7 @@ def remove_image_artifacts(tag):
 def list_project_containers(project_name):
     prefix = f"{project_name}_"
     names = []
-    for state_file in os.listdir(STATE_DIR):
-        if not state_file.endswith('.json'):
-            continue
-        try:
-            with open(os.path.join(STATE_DIR, state_file)) as f:
-                state = json.load(f)
-        except Exception:
-            continue
+    for state in iter_states():
         name = state.get('name')
         if name and name.startswith(prefix):
             names.append(name)
@@ -551,15 +559,11 @@ class WindowsEngine:
 
     def ps(self):
         print(f"{'CONTAINER ID':<15} {'NAME':<15} {'IMAGE':<15} {'STATUS':<10} {'PORTS'}")
-        for f in os.listdir(STATE_DIR):
-            if f.endswith(".json"):
-                try:
-                    d = json.load(open(os.path.join(STATE_DIR, f)))
-                    if d.get('status') == 'running':
-                        name = d.get('name') or "-"
-                        ports = ",".join(d.get('ports', []))
-                        print(f"{d['id']:<15} {name:<15} {d['image']:<15} {d['status']:<10} {ports}")
-                except: pass
+        for d in iter_states():
+            if d.get('status') == 'running':
+                name = d.get('name') or "-"
+                ports = ",".join(d.get('ports', []))
+                print(f"{d['id']:<15} {name:<15} {d['image']:<15} {d['status']:<10} {ports}")
 
     def inject_hosts(self, cid, hosts_map):
         """Updates /etc/hosts"""
@@ -725,13 +729,9 @@ class LinuxEngine:
 
     def ps(self):
         print(f"{'CONTAINER ID':<15} {'NAME':<15} {'IMAGE':<15} {'STATUS':<10} {'PORTS'}")
-        for f in os.listdir(STATE_DIR):
-            if f.endswith(".json"):
-                try:
-                    d = json.load(open(os.path.join(STATE_DIR, f)))
-                    if d.get('status') == 'running':
-                        print(f"{d['id']:<15} {d.get('name') or '-':<15} {d['image']:<15} {d['status']:<10} {','.join(d.get('ports',[]))}")
-                except: pass
+        for d in iter_states():
+            if d.get('status') == 'running':
+                print(f"{d['id']:<15} {d.get('name') or '-':<15} {d['image']:<15} {d['status']:<10} {','.join(d.get('ports',[]))}")
 
     def inject_hosts(self, cid, hosts_map):
         pass
