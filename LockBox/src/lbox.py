@@ -16,6 +16,7 @@ import hashlib
 import urllib.request
 import re
 import shlex
+import ctypes
 from datetime import datetime
 from lbox_create import register_create_commands
 
@@ -81,6 +82,41 @@ def run_quiet(cmd_list):
         subprocess.check_call(cmd_list, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         return True
     except: return False
+
+def is_windows_admin():
+    if not IS_WINDOWS:
+        return True
+    try:
+        return bool(ctypes.windll.shell32.IsUserAnAdmin())
+    except Exception:
+        return False
+
+def _ps_quote(value):
+    return "'" + str(value).replace("'", "''") + "'"
+
+
+def relaunch_self_as_admin():
+    if not IS_WINDOWS:
+        return False
+
+    script = os.path.abspath(sys.argv[0])
+    argv = [script] + sys.argv[1:]
+    args_literal = ", ".join(_ps_quote(arg) for arg in argv)
+    ps_cmd = (
+        f"$p = Start-Process -FilePath {_ps_quote(sys.executable)} "
+        f"-ArgumentList @({args_literal}) -Verb RunAs -PassThru -Wait; "
+        "exit $p.ExitCode"
+    )
+
+    try:
+        rc = subprocess.call(['powershell', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', ps_cmd])
+    except Exception as e:
+        print(f"Error: Failed to request elevation ({e}).")
+        return False
+
+    if rc != 0:
+        print("Warning: Elevation was cancelled or failed. Service mode requires Administrator privileges.")
+    return True
 
 def check_port_free(port):
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -189,6 +225,55 @@ def _container_service_name(state):
     return f"lockbox-{_normalize_service_name(base)}"
 
 
+def _windows_service_command(script, python_exe, cid):
+    return f'"{python_exe}" "{script}" internal-daemon "{cid}"'
+
+
+def _windows_task_name(service_name):
+    return f"LockBox\\{service_name}"
+
+
+def _register_windows_startup_task(service_name, command):
+    task_name = _windows_task_name(service_name)
+    create_proc = subprocess.run(
+        ['schtasks', '/Create', '/TN', task_name, '/SC', 'ONSTART', '/RL', 'HIGHEST', '/F', '/TR', command],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    if create_proc.returncode != 0:
+        err_text = (create_proc.stderr or create_proc.stdout or '').strip()
+        if err_text:
+            print(f"Warning: Could not create Windows startup task '{task_name}': {err_text}")
+        else:
+            print(f"Warning: Could not create Windows startup task '{task_name}'.")
+        return False
+
+    run_proc = subprocess.run(
+        ['schtasks', '/Run', '/TN', task_name],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    if run_proc.returncode != 0:
+        err_text = (run_proc.stderr or run_proc.stdout or '').strip()
+        if err_text:
+            print(f"Warning: Created task '{task_name}' but could not start it immediately: {err_text}")
+        else:
+            print(f"Warning: Created task '{task_name}' but could not start it immediately.")
+    return True
+
+
+def _stop_windows_startup_task(service_name):
+    task_name = _windows_task_name(service_name)
+    subprocess.call(['schtasks', '/End', '/TN', task_name], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def _remove_windows_startup_task(service_name):
+    task_name = _windows_task_name(service_name)
+    subprocess.call(['schtasks', '/Delete', '/TN', task_name, '/F'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
 def _register_container_service(state):
     cid = state.get('id')
     if not cid:
@@ -200,14 +285,13 @@ def _register_container_service(state):
 
     try:
         if IS_WINDOWS:
-            quoted = f'"{python_exe}" "{script}" internal-daemon {cid}'
-            exists = subprocess.call(['sc', 'query', service_name], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL) == 0
-            if not exists:
-                rc = subprocess.call(['sc', 'create', service_name, f'binPath= {quoted}', 'start= auto'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                if rc != 0:
-                    print(f"Warning: Could not create Windows service '{service_name}'.")
-                    return False
-            subprocess.call(['sc', 'start', service_name], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            if not is_windows_admin():
+                print(f"Warning: Windows service mode requires an elevated terminal (Admin). Service '{service_name}' not created.")
+                return False
+
+            create_cmd = _windows_service_command(script, python_exe, cid)
+            if not _register_windows_startup_task(service_name, create_cmd):
+                return False
         else:
             unit_name = f"{service_name}.service"
             unit_path = os.path.join('/etc/systemd/system', unit_name)
@@ -237,7 +321,7 @@ def _register_container_service(state):
 
         state['service_enabled'] = True
         state['service_name'] = service_name
-        state['service_platform'] = 'windows' if IS_WINDOWS else 'linux'
+        state['service_platform'] = 'windows-task' if IS_WINDOWS else 'linux'
         save_state(cid, state)
         print(f"Service mode enabled: {service_name}")
         return True
@@ -253,7 +337,7 @@ def _stop_container_service(state):
     service_name = state.get('service_name') or _container_service_name(state)
     try:
         if IS_WINDOWS:
-            subprocess.call(['sc', 'stop', service_name], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            _stop_windows_startup_task(service_name)
         else:
             subprocess.call(['systemctl', 'stop', f"{service_name}.service"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except Exception:
@@ -267,8 +351,8 @@ def _remove_container_service(state):
     service_name = state.get('service_name') or _container_service_name(state)
     try:
         if IS_WINDOWS:
-            subprocess.call(['sc', 'stop', service_name], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            subprocess.call(['sc', 'delete', service_name], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            _stop_windows_startup_task(service_name)
+            _remove_windows_startup_task(service_name)
         else:
             unit_name = f"{service_name}.service"
             unit_path = os.path.join('/etc/systemd/system', unit_name)
@@ -286,16 +370,18 @@ def _remove_container_service(state):
 def get_container_ip(cid, log_file=None):
     if not cid: return None
 
-    # 1. Python Probe (Most reliable)
+    # 1. Fast IP probe (works even on minimal images without python3)
     try:
         if IS_WINDOWS:
-            # We explicitly ask for the non-localhost IP
-            cmd = ['wsl', '-d', cid, 'python3', '-c', 
-                   'import socket; print([ip for ip in socket.gethostbyname_ex(socket.gethostname())[2] if not ip.startswith("127.")][0])']
-            output = subprocess.check_output(cmd).decode().strip()
+            cmd = [
+                'wsl', '-d', cid, 'sh', '-c',
+                "hostname -i 2>/dev/null | awk '{for(i=1;i<=NF;i++) if ($i !~ /^127\./) {print $i; exit}}'",
+            ]
+            output = subprocess.check_output(cmd, stderr=subprocess.DEVNULL).decode().strip()
             if re.match(r"^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$", output):
                 return output
-    except: pass
+    except:
+        pass
 
     # 2. Raw ifconfig Parsing (Looking specifically for 172.x or 192.x)
     try:
@@ -1093,6 +1179,11 @@ def build(path, t):
 @click.option('--service/--no-service', default=False, help='Register container as a host-managed service.')
 @click.argument('cmd', required=False)
 def run(image, name, port, volume, env, detach, restart, label, network, service, cmd):
+    if service and IS_WINDOWS and not is_windows_admin():
+        print("Requesting Administrator privileges for --service...")
+        relaunch_self_as_admin()
+        return
+
     labels = parse_env_entries(label)
     eng.run(image, name, port, volume, env, detach, cmd, restart_policy=restart, labels=labels, network=network, as_service=service)
 
@@ -1175,6 +1266,8 @@ create = register_create_commands(
     list_project_containers,
     remove_image_artifacts,
     get_container_ip,
+    is_windows_admin,
+    relaunch_self_as_admin,
 )
 
 for c in [build, run, stop, restart, inspect, rm, exec, ps, images, logs, internal_daemon, monitor_daemon]:
