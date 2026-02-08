@@ -89,6 +89,51 @@ def get_remote_header(url, header='Last-Modified'):
             return response.headers.get(header) or response.headers.get('ETag')
     except: return None
 
+def cleanup_container_resources(state):
+    if not state:
+        return
+
+    cid = state.get('id')
+    root = state.get('root')
+
+    if IS_WINDOWS and cid:
+        run_quiet(['wsl', '--terminate', cid])
+        run_quiet(['wsl', '--unregister', cid])
+    else:
+        for mount in state.get('mounts', []):
+            run_quiet(['umount', '-l', mount])
+        if root:
+            run_quiet(['umount', '-l', os.path.join(root, 'proc')])
+
+    if root:
+        shutil.rmtree(root, ignore_errors=True)
+    if cid:
+        remove_state(cid)
+
+def spawn_internal_daemon(cid, log_handle=None):
+    script = os.path.abspath(__file__)
+    python_exe = sys.executable
+    startupinfo = None
+    creationflags = 0
+
+    if IS_WINDOWS:
+        startupinfo = subprocess.STARTUPINFO()
+        startupinfo.dwFlags |= 1
+        startupinfo.wShowWindow = 0
+        creationflags = 0x00000200
+
+    proc = subprocess.Popen(
+        [python_exe, script, "internal-daemon", cid],
+        cwd=INSTALL_DIR,
+        creationflags=creationflags,
+        startupinfo=startupinfo,
+        close_fds=True,
+        start_new_session=True,
+        stdout=log_handle if log_handle else subprocess.DEVNULL,
+        stderr=subprocess.STDOUT if log_handle else subprocess.DEVNULL
+    )
+    return proc
+
 # ==========================================
 # ROBUST NETWORKING (FIXED FOR WSL 172.x)
 # ==========================================
@@ -195,6 +240,21 @@ def tcp_proxy(src, target_ip, dst, stop_event, log_file):
         except socket.timeout: continue
         except: break
     server.close()
+
+def parse_env_entries(envs):
+    env_map = {}
+    for entry in envs or []:
+        if '=' in entry:
+            key, value = entry.split('=', 1)
+            env_map[key] = value
+    return env_map
+
+def normalize_run_options(ports, volumes, envs):
+    return {
+        "ports": list(ports or []),
+        "volumes": list(volumes or []),
+        "envs": list(envs or [])
+    }
 
 def handle_connection_retry(client, ip, port, log_file):
     target = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -329,7 +389,7 @@ class WindowsEngine:
             run_quiet(['wsl', '--unregister', bid])
             shutil.rmtree(root, ignore_errors=True)
 
-    def run(self, image, name, ports, volumes, envs, detach, cmd):
+    def run(self, image, name, ports, volumes, envs, detach, cmd, restart_policy="no", labels=None, network="bridge"):
         self.check_reqs()
         if name and get_id_by_name(name): 
             print(f"Note: Container '{name}' already exists. Skipping.")
@@ -362,8 +422,13 @@ class WindowsEngine:
                 "id": cid, "name": name, "image": image, "status": "starting", 
                 "ports": ports, "volumes": volumes, "envs": envs, 
                 "command": cmd,
-                "workdir": workdir, 
-                "created": datetime.now().isoformat(), "root": root
+                "workdir": workdir,
+                "created": datetime.now().isoformat(),
+                "root": root,
+                "restart": restart_policy or "no",
+                "restart_count": 0,
+                "labels": labels or {},
+                "network": network or "bridge"
             }
             save_state(cid, state)
 
@@ -372,26 +437,7 @@ class WindowsEngine:
             log_handle.write(f"--- Init {name or cid} ---\n")
             log_handle.flush()
 
-            script = os.path.abspath(__file__)
-            python_exe = sys.executable
-
-            startupinfo = None
-            if IS_WINDOWS:
-                startupinfo = subprocess.STARTUPINFO()
-                startupinfo.dwFlags |= 1; startupinfo.wShowWindow = 0
-
-            flags = 0x00000200
-
-            subprocess.Popen(
-                [python_exe, script, "internal-daemon", cid], 
-                cwd=INSTALL_DIR, 
-                creationflags=flags, 
-                startupinfo=startupinfo,
-                close_fds=True, 
-                start_new_session=True,
-                stdout=log_handle, 
-                stderr=subprocess.STDOUT
-            )
+            spawn_internal_daemon(cid, log_handle)
 
             print(f"Starting {name or cid}...", end="", flush=True)
             for _ in range(240): 
@@ -445,9 +491,7 @@ class WindowsEngine:
         print("Done.")
 
     def force_cleanup(self, cid):
-        run_quiet(['wsl', '--unregister', cid])
-        shutil.rmtree(os.path.join(CONTAINERS_DIR, cid), ignore_errors=True)
-        remove_state(cid)
+        cleanup_container_resources(load_state(cid) or {"id": cid, "root": os.path.join(CONTAINERS_DIR, cid)})
 
     def exec(self, ident, cmd, interactive):
         s = load_state(ident)
@@ -559,7 +603,7 @@ class LinuxEngine:
         except Exception as e: print(f"Build Failed: {e}")
         finally: shutil.rmtree(root, ignore_errors=True)
 
-    def run(self, image, name, ports, volumes, envs, detach, cmd):
+    def run(self, image, name, ports, volumes, envs, detach, cmd, restart_policy="no", labels=None, network="bridge"):
         self.check_reqs()
         if name and get_id_by_name(name): return print(f"Error: Name '{name}' taken.")
         for p in ports:
@@ -587,8 +631,13 @@ class LinuxEngine:
                 "id": cid, "name": name, "image": image, "status": "starting",
                 "ports": ports, "volumes": volumes, "envs": envs,
                 "command": cmd,
-                "workdir": workdir, 
-                "created": datetime.now().isoformat(), "root": root
+                "workdir": workdir,
+                "created": datetime.now().isoformat(),
+                "root": root,
+                "restart": restart_policy or "no",
+                "restart_count": 0,
+                "labels": labels or {},
+                "network": network or "bridge"
             }
             save_state(cid, state)
 
@@ -596,9 +645,7 @@ class LinuxEngine:
             lf = open(lp, 'a')
             lf.write(f"--- Init {cid} ---\\n"); lf.flush()
 
-            py = sys.executable
-            sc = os.path.abspath(__file__)
-            subprocess.Popen([py, sc, "internal-daemon", cid], cwd=INSTALL_DIR, close_fds=True, start_new_session=True, stdout=lf, stderr=subprocess.STDOUT)
+            spawn_internal_daemon(cid, lf)
 
             print("Starting...", end="", flush=True)
             for _ in range(40):
@@ -667,78 +714,95 @@ def internal_daemon(cid):
     sys.stdout.reconfigure(line_buffering=True)
     sys.stderr.reconfigure(line_buffering=True)
 
-    s = load_state(cid)
-    if not s: return print(f"Fatal: State missing {cid}")
+    while True:
+        s = load_state(cid)
+        if not s:
+            return print(f"Fatal: State missing {cid}")
 
-    print(f"[Daemon] Init {cid} at {datetime.now()}")
-    stop = threading.Event()
+        print(f"[Daemon] Init {cid} at {datetime.now()}")
+        stop = threading.Event()
 
-    # 1. Network Start
-    if s.get('ports'):
-        if not start_port_forwarding(cid, s['ports'], stop, sys.stdout):
-            s['status'] = 'error'
+        if s.get('ports'):
+            if not start_port_forwarding(cid, s['ports'], stop, sys.stdout):
+                s['status'] = 'error'
+                save_state(cid, s)
+                return
+
+        exit_code = 0
+        try:
+            cmd = s.get('command') or "sleep infinity"
+            workdir = s.get('workdir', '/')
+
+            s['status'] = 'running'
             save_state(cid, s)
+
+            print(f"[Daemon] WorkDir: {workdir}")
+            print(f"[Daemon] Running: {cmd}")
+
+            if IS_WINDOWS:
+                for v in s.get('volumes', []):
+                    h, c = v.rsplit(':', 1)
+                    wh = os.path.abspath(h).replace('\\','/')
+                    drive, rest = os.path.splitdrive(wh)
+                    if drive: wh = f"/mnt/{drive[0].lower()}{rest}"
+                    subprocess.call(['wsl', '-d', cid, 'sh', '-c', f'mkdir -p {c} && mount --bind "{wh}" "{c}"'])
+
+                for e in s.get('envs', []):
+                    subprocess.call(['wsl', '-d', cid, 'sh', '-c', f"echo 'export {e}' >> /etc/profile"])
+
+                subprocess.call(['wsl', '-d', cid, 'sh', '-c', 'echo "nameserver 8.8.8.8" > /etc/resolv.conf'])
+                full_cmd = f"cd {workdir} && {cmd}"
+                exit_code = subprocess.call(['wsl', '-d', cid, 'sh', '-c', full_cmd])
+            else:
+                mp = []
+                for v in s.get('volumes', []):
+                    h, c = v.rsplit(':', 1)
+                    t = os.path.join(s['root'], c.lstrip('/'))
+                    os.makedirs(t, exist_ok=True)
+                    subprocess.call(['mount', '--bind', h, t])
+                    mp.append(t)
+                proc = os.path.join(s['root'], 'proc')
+                os.makedirs(proc, exist_ok=True)
+                subprocess.call(['mount', '-t', 'proc', '/proc', proc])
+                s['mounts'] = mp
+                save_state(cid, s)
+
+                full_cmd = f"cd {workdir} && {cmd}"
+                exit_code = subprocess.call(['chroot', s['root'], '/bin/sh', '-c', full_cmd])
+
+        except Exception as e:
+            print(f"Crash: {e}")
+            exit_code = 1
+        finally:
+            stop.set()
+
+        s = load_state(cid)
+        if not s:
             return
 
-    try:
-        # 2. Command Execution
-        cmd = s.get('command')
-        if not cmd: cmd = "sleep infinity"
-        workdir = s.get('workdir', '/')
+        restart_policy = s.get('restart', 'no')
+        restart_count = s.get('restart_count', 0)
+        should_restart = False
 
-        s['status'] = 'running'
-        save_state(cid, s)
+        if restart_policy == 'always':
+            should_restart = True
+        elif restart_policy == 'on-failure' and exit_code != 0:
+            should_restart = True
+        elif restart_policy.startswith('unless-stopped'):
+            should_restart = s.get('status') != 'exited'
 
-        print(f"[Daemon] WorkDir: {workdir}")
-        print(f"[Daemon] Running: {cmd}")
-
-        if IS_WINDOWS:
-            # Mounts
-            for v in s.get('volumes', []):
-                h, c = v.rsplit(':', 1)
-                wh = os.path.abspath(h).replace('\\\\','/')
-                drive, rest = os.path.splitdrive(wh)
-                if drive: wh = f"/mnt/{drive[0].lower()}{rest}"
-                subprocess.call(['wsl', '-d', cid, 'sh', '-c', f'mkdir -p {c} && mount --bind "{wh}" "{c}"'])
-
-            # Envs
-            for e in s.get('envs', []):
-                subprocess.call(['wsl', '-d', cid, 'sh', '-c', f"echo 'export {e}' >> /etc/profile"])
-
-            subprocess.call(['wsl', '-d', cid, 'sh', '-c', 'echo "nameserver 8.8.8.8" > /etc/resolv.conf'])
-
-            # --- EXECUTE WITH CD ---
-            full_cmd = f"cd {workdir} && {cmd}"
-            subprocess.call(['wsl', '-d', cid, 'sh', '-c', full_cmd])
-        else:
-            mp = []
-            for v in s.get('volumes', []):
-                h, c = v.rsplit(':', 1)
-                t = os.path.join(s['root'], c.lstrip('/'))
-                os.makedirs(t, exist_ok=True)
-                subprocess.call(['mount', '--bind', h, t])
-                mp.append(t)
-            proc = os.path.join(s['root'], 'proc')
-            os.makedirs(proc, exist_ok=True)
-            subprocess.call(['mount', '-t', 'proc', '/proc', proc])
-            s['mounts'] = mp
+        if should_restart and s.get('status') != 'exited':
+            s['restart_count'] = restart_count + 1
+            s['status'] = 'restarting'
             save_state(cid, s)
+            print(f"[Daemon] Restarting {cid} (count={s['restart_count']})")
+            time.sleep(1)
+            continue
 
-            # Linux Exec with CD
-            full_cmd = f"cd {workdir} && {cmd}"
-            subprocess.call(['chroot', s['root'], '/bin/sh', '-c', full_cmd])
+        s['status'] = 'exited'
+        save_state(cid, s)
+        return
 
-    except Exception as e: print(f"Crash: {e}")
-    finally:
-        stop.set()
-        try:
-            s = load_state(cid)
-            if s: s['status'] = 'exited'; save_state(cid, s)
-        except: pass
-
-# ==========================================
-# MONITOR DAEMON (WATCHTOWER)
-# ==========================================
 @click.command(name='monitor-daemon', hidden=True)
 @click.argument('config_path')
 @click.argument('project_name')
@@ -810,7 +874,18 @@ def monitor_daemon(config_path, project_name):
                     vols = svc.get('volumes', [])
                     envs = svc.get('environment', [])
 
-                    eng.run(image_tag, container_name, ports, vols, envs, True, None)
+                    eng.run(
+                        image_tag,
+                        container_name,
+                        ports,
+                        vols,
+                        envs,
+                        True,
+                        None,
+                        restart_policy=svc.get('restart', 'no'),
+                        labels=svc.get('labels', {}),
+                        network=svc.get('network', 'bridge')
+                    )
                     print(f"[OK] {container_name} updated.")
 
         except Exception as e:
@@ -850,13 +925,56 @@ def build(path, t):
 @click.option('--volume', '-v', multiple=True)
 @click.option('--env', '-e', multiple=True)
 @click.option('--detach', '-d', is_flag=True)
+@click.option('--restart', type=click.Choice(['no', 'always', 'on-failure', 'unless-stopped']), default='no')
+@click.option('--label', '-l', multiple=True, help='Set metadata labels key=value')
+@click.option('--network', default='bridge')
 @click.argument('cmd', required=False)
-def run(image, name, port, volume, env, detach, cmd): 
-    eng.run(image, name, port, volume, env, detach, cmd)
+def run(image, name, port, volume, env, detach, restart, label, network, cmd):
+    labels = parse_env_entries(label)
+    eng.run(image, name, port, volume, env, detach, cmd, restart_policy=restart, labels=labels, network=network)
 
 @click.command()
 @click.argument('identifier')
 def stop(identifier): eng.stop(identifier)
+
+@click.command()
+@click.argument('identifier')
+def restart(identifier):
+    s = load_state(identifier)
+    if not s:
+        return print("Container not found.")
+
+    runtime = normalize_run_options(s.get('ports'), s.get('volumes'), s.get('envs'))
+    config = {
+        "image": s.get('image'),
+        "name": s.get('name'),
+        "command": s.get('command'),
+        "restart": s.get('restart', 'no'),
+        "labels": s.get('labels', {}),
+        "network": s.get('network', 'bridge')
+    }
+
+    eng.rm(identifier)
+    eng.run(
+        config['image'],
+        config['name'],
+        runtime['ports'],
+        runtime['volumes'],
+        runtime['envs'],
+        True,
+        config['command'],
+        restart_policy=config['restart'],
+        labels=config['labels'],
+        network=config['network']
+    )
+
+@click.command()
+@click.argument('identifier')
+def inspect(identifier):
+    s = load_state(identifier)
+    if not s:
+        return print("Container not found.")
+    print(json.dumps(s, indent=2, sort_keys=True))
 
 @click.command()
 @click.argument('identifier')
@@ -915,12 +1033,18 @@ def up(file, detach):
         if get_id_by_name(container_name):
             print(f"Container {container_name} already running.")
         else:
-            eng.run(image_tag, container_name, 
-                   svc.get('ports', []), 
-                   svc.get('volumes', []), 
-                   svc.get('environment', []), 
-                   True, 
-                   None)
+            eng.run(
+                image_tag,
+                container_name,
+                svc.get('ports', []),
+                svc.get('volumes', []),
+                svc.get('environment', []),
+                True,
+                None,
+                restart_policy=svc.get('restart', 'no'),
+                labels=svc.get('labels', {}),
+                network=svc.get('network', 'bridge')
+            )
             print(f"Started {container_name}")
 
         if svc.get('auto-update', {}).get('enabled'):
@@ -1002,7 +1126,7 @@ def down(file):
             eng.stop(cname)
             eng.rm(cname)
 
-for c in [build, run, stop, rm, exec, ps, images, logs, internal_daemon, monitor_daemon, create]:
+for c in [build, run, stop, restart, inspect, rm, exec, ps, images, logs, internal_daemon, monitor_daemon, create]:
     cli.add_command(c)
 
 if __name__ == '__main__': cli()
