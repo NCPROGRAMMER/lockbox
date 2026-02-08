@@ -64,6 +64,7 @@ def register_create_commands(
     get_container_ip,
     is_windows_admin,
     relaunch_self_as_admin,
+    remove_service_artifacts_by_container_name,
 ):
     @cli.group()
     def create():
@@ -200,14 +201,19 @@ def register_create_commands(
                     startupinfo.dwFlags |= 1
                     startupinfo.wShowWindow = 0
 
-                creationflags = 0x00000200 if is_windows else 0
+                creationflags = (0x00000008 | 0x00000200 | 0x08000000) if is_windows else 0
+                monitor_log_path = os.path.join(state_dir, f"monitor_{project_name}.log")
+                monitor_log = open(monitor_log_path, "a")
                 p = subprocess.Popen(
                     [sys.executable, sys.argv[0], "monitor-daemon", os.path.abspath(file), project_name],
                     cwd=install_dir,
                     creationflags=creationflags,
                     startupinfo=startupinfo,
                     close_fds=True,
+                    stdout=monitor_log,
+                    stderr=subprocess.STDOUT,
                 )
+                monitor_log.close()
                 with open(pid_file, 'w') as f:
                     f.write(str(p.pid))
                 print(f"Monitor started (PID {p.pid})")
@@ -241,6 +247,8 @@ def register_create_commands(
                 print(f"Stopping {cname}...")
                 eng.stop(cname)
                 eng.rm(cname)
+            else:
+                remove_service_artifacts_by_container_name(cname)
 
         if remove_orphans:
             defined = {f"{project_name}_{name}" for name in services}
@@ -249,6 +257,11 @@ def register_create_commands(
                     print(f"Removing orphan container {cname}...")
                     eng.stop(cname)
                     eng.rm(cname)
+            known_containers = set(list_project_containers(project_name))
+            for name in services:
+                cname = f"{project_name}_{name}"
+                if cname not in known_containers:
+                    remove_service_artifacts_by_container_name(cname)
 
         if rmi != 'none':
             for name, svc in services.items():
