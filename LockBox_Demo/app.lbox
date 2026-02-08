@@ -15,7 +15,7 @@ BOX_ENV PATH="/app/venv/bin:$PATH"
 
 # 3. Install Dependencies
 BOX_COPY requirements.txt .
-BOX_EXEC pip install -r requirements.txt
+BOX_EXEC /app/venv/bin/pip install -r requirements.txt
 
 # 4. Copy App Code
 BOX_COPY . .
