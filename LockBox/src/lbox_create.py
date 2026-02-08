@@ -201,7 +201,7 @@ def register_create_commands(
                     startupinfo.dwFlags |= 1
                     startupinfo.wShowWindow = 0
 
-                creationflags = (0x00000008 | 0x00000200) if is_windows else 0
+                creationflags = (0x00000008 | 0x00000200 | 0x08000000) if is_windows else 0
                 p = subprocess.Popen(
                     [sys.executable, sys.argv[0], "monitor-daemon", os.path.abspath(file), project_name],
                     cwd=install_dir,
