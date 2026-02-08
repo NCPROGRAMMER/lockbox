@@ -64,6 +64,7 @@ def register_create_commands(
     get_container_ip,
     is_windows_admin,
     relaunch_self_as_admin,
+    remove_service_artifacts_by_container_name,
 ):
     @cli.group()
     def create():
@@ -200,7 +201,7 @@ def register_create_commands(
                     startupinfo.dwFlags |= 1
                     startupinfo.wShowWindow = 0
 
-                creationflags = 0x00000200 if is_windows else 0
+                creationflags = (0x00000008 | 0x00000200) if is_windows else 0
                 p = subprocess.Popen(
                     [sys.executable, sys.argv[0], "monitor-daemon", os.path.abspath(file), project_name],
                     cwd=install_dir,
@@ -241,6 +242,8 @@ def register_create_commands(
                 print(f"Stopping {cname}...")
                 eng.stop(cname)
                 eng.rm(cname)
+            else:
+                remove_service_artifacts_by_container_name(cname)
 
         if remove_orphans:
             defined = {f"{project_name}_{name}" for name in services}
@@ -249,6 +252,11 @@ def register_create_commands(
                     print(f"Removing orphan container {cname}...")
                     eng.stop(cname)
                     eng.rm(cname)
+            known_containers = set(list_project_containers(project_name))
+            for name in services:
+                cname = f"{project_name}_{name}"
+                if cname not in known_containers:
+                    remove_service_artifacts_by_container_name(cname)
 
         if rmi != 'none':
             for name, svc in services.items():
