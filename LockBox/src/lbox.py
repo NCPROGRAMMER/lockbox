@@ -300,20 +300,6 @@ def _register_windows_startup_task(service_name, command):
             _log_windows_service_error(f"Create failed for '{task_name}' with no output.")
         return False
 
-    run_proc = subprocess.run(
-        ['schtasks', '/Run', '/TN', task_name],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-    )
-    if run_proc.returncode != 0:
-        err_text = (run_proc.stderr or run_proc.stdout or '').strip()
-        if err_text:
-            print(f"Warning: Created task '{task_name}' but could not start it immediately: {err_text}")
-            _log_windows_service_error(f"Run failed for '{task_name}': {err_text}")
-        else:
-            print(f"Warning: Created task '{task_name}' but could not start it immediately.")
-            _log_windows_service_error(f"Run failed for '{task_name}' with no output.")
     return True
 
 
@@ -738,11 +724,13 @@ class WindowsEngine:
             log_handle.flush()
 
             if as_service:
-                if not _register_container_service(state):
+                service_registered = _register_container_service(state)
+                if not service_registered:
                     print("Warning: Falling back to non-service mode.")
                     state['service_enabled'] = False
                     state['service_name'] = None
                     save_state(cid, state)
+                if IS_WINDOWS or not service_registered:
                     spawn_internal_daemon(cid, log_handle)
             else:
                 spawn_internal_daemon(cid, log_handle)
@@ -954,11 +942,13 @@ class LinuxEngine:
             lf.write(f"--- Init {cid} ---\\n"); lf.flush()
 
             if as_service:
-                if not _register_container_service(state):
+                service_registered = _register_container_service(state)
+                if not service_registered:
                     print("Warning: Falling back to non-service mode.")
                     state['service_enabled'] = False
                     state['service_name'] = None
                     save_state(cid, state)
+                if IS_WINDOWS or not service_registered:
                     spawn_internal_daemon(cid, lf)
             else:
                 spawn_internal_daemon(cid, lf)
