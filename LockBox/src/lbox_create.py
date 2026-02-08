@@ -202,13 +202,18 @@ def register_create_commands(
                     startupinfo.wShowWindow = 0
 
                 creationflags = (0x00000008 | 0x00000200 | 0x08000000) if is_windows else 0
+                monitor_log_path = os.path.join(state_dir, f"monitor_{project_name}.log")
+                monitor_log = open(monitor_log_path, "a")
                 p = subprocess.Popen(
                     [sys.executable, sys.argv[0], "monitor-daemon", os.path.abspath(file), project_name],
                     cwd=install_dir,
                     creationflags=creationflags,
                     startupinfo=startupinfo,
                     close_fds=True,
+                    stdout=monitor_log,
+                    stderr=subprocess.STDOUT,
                 )
+                monitor_log.close()
                 with open(pid_file, 'w') as f:
                     f.write(str(p.pid))
                 print(f"Monitor started (PID {p.pid})")

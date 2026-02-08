@@ -262,7 +262,11 @@ def _container_service_name(state):
 
 
 def _windows_service_command(script, python_exe, cid):
-    return f'"{python_exe}" "{script}" internal-daemon "{cid}"'
+    logs_file = os.path.join(LOGS_DIR, f"{cid}.log")
+    return (
+        f'cmd.exe /d /c ""{python_exe}" "{script}" internal-daemon "{cid}" '
+        f'>> "{logs_file}" 2>&1"'
+    )
 
 
 def _windows_task_name(service_name):
