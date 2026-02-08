@@ -1,0 +1,9 @@
+# LockBox runtime artifacts
+containers/
+images/
+LockBox_v0.3/containers/
+LockBox_v0.3/images/
+
+# Python artifacts
+__pycache__/
+*.pyc

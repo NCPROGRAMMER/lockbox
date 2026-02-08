@@ -89,6 +89,37 @@ def get_remote_header(url, header='Last-Modified'):
             return response.headers.get(header) or response.headers.get('ETag')
     except: return None
 
+def image_exists(tag):
+    return any(
+        os.path.exists(os.path.join(IMAGES_DIR, f"{tag}{ext}"))
+        for ext in (".tar", ".tar.gz")
+    )
+
+def remove_image_artifacts(tag):
+    removed = False
+    for ext in (".tar", ".tar.gz"):
+        image_path = os.path.join(IMAGES_DIR, f"{tag}{ext}")
+        if os.path.exists(image_path):
+            os.remove(image_path)
+            removed = True
+    return removed
+
+def list_project_containers(project_name):
+    prefix = f"{project_name}_"
+    names = []
+    for state_file in os.listdir(STATE_DIR):
+        if not state_file.endswith('.json'):
+            continue
+        try:
+            with open(os.path.join(STATE_DIR, state_file)) as f:
+                state = json.load(f)
+        except Exception:
+            continue
+        name = state.get('name')
+        if name and name.startswith(prefix):
+            names.append(name)
+    return names
+
 def cleanup_container_resources(state):
     if not state:
         return
@@ -1006,13 +1037,28 @@ def create(): pass
 @create.command()
 @click.option('--file', '-f', default='lockbox-create.yml')
 @click.option('--detach', '-d', is_flag=True)
-def up(file, detach):
+@click.option('--force-recreate', is_flag=True, help='Recreate containers even if they already exist.')
+@click.option('--no-recreate', is_flag=True, help='Do not recreate existing containers.')
+@click.option('--build/--no-build', default=True, help='Build images before starting containers.')
+@click.option('--remove-orphans', is_flag=True, help='Remove containers for this project that are not defined in the compose file.')
+def up(file, detach, force_recreate, no_recreate, build, remove_orphans):
+    if force_recreate and no_recreate:
+        raise click.UsageError("--force-recreate and --no-recreate cannot be used together.")
+
     if not os.path.exists(file): return print("YAML file not found.")
 
     with open(file, 'r') as f: config = yaml.safe_load(f)
 
     project_name = os.path.basename(os.getcwd()).lower().replace(' ', '')
     services = config.get('services', {})
+
+    if remove_orphans:
+        defined = {f"{project_name}_{name}" for name in services}
+        for cname in list_project_containers(project_name):
+            if cname not in defined:
+                print(f"Removing orphan container {cname}...")
+                eng.stop(cname)
+                eng.rm(cname)
 
     needs_monitor = False
 
@@ -1022,16 +1068,26 @@ def up(file, detach):
         image_tag = svc.get('image', container_name)
 
         # Build logic
-        if 'build' in svc and not os.path.exists(os.path.join(IMAGES_DIR, f"{image_tag}.tar")):
+        if 'build' in svc and build:
             print(f"Building {name}...")
             subprocess.call([sys.executable, sys.argv[0], "build", "-t", image_tag, svc.get('build', '.')])
 
-        if not os.path.exists(os.path.join(IMAGES_DIR, f"{image_tag}.tar")):
+        if not image_exists(image_tag):
             print(f"Error: Build failed for {name}. Image not found. Skipping.")
             continue
 
-        if get_id_by_name(container_name):
-            print(f"Container {container_name} already running.")
+        existing_id = get_id_by_name(container_name)
+        if existing_id and force_recreate:
+            print(f"Recreating {container_name}...")
+            eng.stop(container_name)
+            eng.rm(container_name)
+            existing_id = None
+
+        if existing_id:
+            if no_recreate:
+                print(f"Container {container_name} already running (no-recreate).")
+            else:
+                print(f"Container {container_name} already running.")
         else:
             eng.run(
                 image_tag,
@@ -1063,7 +1119,7 @@ def up(file, detach):
             cid = get_id_by_name(cname)
             if cid:
                 ip = get_container_ip(cid) # Uses new robust check
-                if ip and ip != '127.0.0.1': 
+                if ip and ip != '127.0.0.1':
                     hosts_map[name] = ip
                     hosts_map[cname] = ip
                 else:
@@ -1105,7 +1161,9 @@ def up(file, detach):
 
 @create.command()
 @click.option('--file', '-f', default='lockbox-create.yml')
-def down(file):
+@click.option('--rmi', type=click.Choice(['none', 'local', 'all']), default='none', show_default=True, help='Remove images used by services.')
+@click.option('--remove-orphans', is_flag=True, help='Remove containers for this project that are not defined in the compose file.')
+def down(file, rmi, remove_orphans):
     if not os.path.exists(file): return
     with open(file, 'r') as f: config = yaml.safe_load(f)
     project_name = os.path.basename(os.getcwd()).lower().replace(' ', '')
@@ -1119,12 +1177,29 @@ def down(file):
         except: pass
         os.remove(pid_file)
 
-    for name in config.get('services', {}):
+    services = config.get('services', {})
+    for name in services:
         cname = f"{project_name}_{name}"
         if get_id_by_name(cname):
             print(f"Stopping {cname}...")
             eng.stop(cname)
             eng.rm(cname)
+
+    if remove_orphans:
+        defined = {f"{project_name}_{name}" for name in services}
+        for cname in list_project_containers(project_name):
+            if cname not in defined:
+                print(f"Removing orphan container {cname}...")
+                eng.stop(cname)
+                eng.rm(cname)
+
+    if rmi != 'none':
+        for name, svc in services.items():
+            if rmi == 'local' and 'build' not in svc:
+                continue
+            image_tag = svc.get('image', f"{project_name}_{name}")
+            if remove_image_artifacts(image_tag):
+                print(f"Removed image {image_tag}")
 
 for c in [build, run, stop, restart, inspect, rm, exec, ps, images, logs, internal_daemon, monitor_daemon, create]:
     cli.add_command(c)

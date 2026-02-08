@@ -144,7 +144,12 @@ This will stop and remove:
 |------|------------|
 | `lbox create up` | Build and start all services |
 | `lbox create up -d` | Start services in detached mode |
+| `lbox create up --force-recreate` | Recreate running service containers |
+| `lbox create up --no-recreate` | Keep already running service containers |
+| `lbox create up --remove-orphans` | Remove project containers missing from compose file |
 | `lbox create down` | Stop and remove all services |
+| `lbox create down --rmi all` | Also remove all service images |
+| `lbox create down --rmi local` | Remove only images built from `build:` definitions |
 | `lbox create up -f file.yml` | Use a custom compose file |
 
 `lbox create` automatically:
