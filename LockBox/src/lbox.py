@@ -200,14 +200,45 @@ def _register_container_service(state):
 
     try:
         if IS_WINDOWS:
-            quoted = f'"{python_exe}" "{script}" internal-daemon {cid}'
-            exists = subprocess.call(['sc', 'query', service_name], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL) == 0
+            create_cmd = f'"{python_exe}" "{script}" internal-daemon "{cid}"'
+            exists = subprocess.call(['sc.exe', 'query', service_name], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL) == 0
             if not exists:
-                rc = subprocess.call(['sc', 'create', service_name, f'binPath= {quoted}', 'start= auto'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                if rc != 0:
-                    print(f"Warning: Could not create Windows service '{service_name}'.")
+                create_proc = subprocess.run(
+                    ['sc.exe', 'create', service_name, 'binPath=', create_cmd, 'start=', 'auto'],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                )
+                if create_proc.returncode != 0:
+                    err_text = (create_proc.stderr or create_proc.stdout or '').strip()
+                    if err_text:
+                        print(f"Warning: Could not create Windows service '{service_name}': {err_text}")
+                    else:
+                        print(f"Warning: Could not create Windows service '{service_name}'.")
                     return False
-            subprocess.call(['sc', 'start', service_name], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+            start_proc = subprocess.run(
+                ['sc.exe', 'start', service_name],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            if start_proc.returncode != 0:
+                query_proc = subprocess.run(
+                    ['sc.exe', 'query', service_name],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                )
+                query_text = (query_proc.stdout or "") + "\n" + (query_proc.stderr or "")
+                query_text = query_text.upper()
+                if 'RUNNING' not in query_text:
+                    start_err = (start_proc.stderr or start_proc.stdout or '').strip()
+                    if start_err:
+                        print(f"Warning: Could not start Windows service '{service_name}': {start_err}")
+                    else:
+                        print(f"Warning: Could not start Windows service '{service_name}'.")
+                    return False
         else:
             unit_name = f"{service_name}.service"
             unit_path = os.path.join('/etc/systemd/system', unit_name)
