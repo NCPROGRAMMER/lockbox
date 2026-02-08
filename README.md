@@ -12,6 +12,8 @@ This demo shows how to run a **Flask web application backed by Redis** using **L
 - Running multiple services (web + redis) with `lockbox-create.yml`  
 - Port forwarding from containers to the host  
 - Absolute-path container startup (**required for LockBox v4.7+**)
+- Health endpoint (`/healthz`) for quick service checks
+- Redis host fallback logic for more reliable local runs
 
 ---
 
@@ -92,6 +94,12 @@ http://localhost:8080
 ```
 
 You should see a page showing a hit counter backed by Redis.
+
+Quick health check:
+
+```bash
+curl http://localhost:8080/healthz
+```
 
 ---
 
