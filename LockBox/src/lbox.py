@@ -225,6 +225,64 @@ def _container_service_name(state):
     return f"lockbox-{_normalize_service_name(base)}"
 
 
+def _windows_service_command(script, python_exe, cid):
+    return f'"{python_exe}" "{script}" internal-daemon "{cid}"'
+
+
+def _windows_task_name(service_name):
+    return f"LockBox\\{service_name}"
+
+
+def _legacy_windows_service_exists(service_name):
+    return subprocess.call(['sc.exe', 'query', service_name], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL) == 0
+
+
+def _remove_legacy_windows_service(service_name):
+    subprocess.call(['sc.exe', 'stop', service_name], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    subprocess.call(['sc.exe', 'delete', service_name], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def _register_windows_startup_task(service_name, command):
+    task_name = _windows_task_name(service_name)
+    create_proc = subprocess.run(
+        ['schtasks', '/Create', '/TN', task_name, '/SC', 'ONSTART', '/RL', 'HIGHEST', '/F', '/TR', command],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    if create_proc.returncode != 0:
+        err_text = (create_proc.stderr or create_proc.stdout or '').strip()
+        if err_text:
+            print(f"Warning: Could not create Windows startup task '{task_name}': {err_text}")
+        else:
+            print(f"Warning: Could not create Windows startup task '{task_name}'.")
+        return False
+
+    run_proc = subprocess.run(
+        ['schtasks', '/Run', '/TN', task_name],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    if run_proc.returncode != 0:
+        err_text = (run_proc.stderr or run_proc.stdout or '').strip()
+        if err_text:
+            print(f"Warning: Created task '{task_name}' but could not start it immediately: {err_text}")
+        else:
+            print(f"Warning: Created task '{task_name}' but could not start it immediately.")
+    return True
+
+
+def _stop_windows_startup_task(service_name):
+    task_name = _windows_task_name(service_name)
+    subprocess.call(['schtasks', '/End', '/TN', task_name], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def _remove_windows_startup_task(service_name):
+    task_name = _windows_task_name(service_name)
+    subprocess.call(['schtasks', '/Delete', '/TN', task_name, '/F'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
 def _register_container_service(state):
     cid = state.get('id')
     if not cid:
@@ -239,48 +297,11 @@ def _register_container_service(state):
             if not is_windows_admin():
                 print(f"Warning: Windows service mode requires an elevated terminal (Admin). Service '{service_name}' not created.")
                 return False
-            create_cmd = f'"{python_exe}" "{script}" internal-daemon "{cid}"'
-            exists = subprocess.call(['sc.exe', 'query', service_name], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL) == 0
-            if not exists:
-                create_proc = subprocess.run(
-                    ['sc.exe', 'create', service_name, 'binPath=', create_cmd, 'start=', 'auto'],
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    text=True,
-                )
-                if create_proc.returncode != 0:
-                    err_text = (create_proc.stderr or create_proc.stdout or '').strip()
-                    if err_text:
-                        if 'OPENSCMANAGER FAILED 5' in err_text.upper() or 'ACCESS IS DENIED' in err_text.upper():
-                            print(f"Warning: Windows service mode requires an elevated terminal (Admin). Service '{service_name}' not created.")
-                        else:
-                            print(f"Warning: Could not create Windows service '{service_name}': {err_text}")
-                    else:
-                        print(f"Warning: Could not create Windows service '{service_name}'.")
-                    return False
-
-            start_proc = subprocess.run(
-                ['sc.exe', 'start', service_name],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-            )
-            if start_proc.returncode != 0:
-                query_proc = subprocess.run(
-                    ['sc.exe', 'query', service_name],
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    text=True,
-                )
-                query_text = (query_proc.stdout or "") + "\n" + (query_proc.stderr or "")
-                query_text = query_text.upper()
-                if 'RUNNING' not in query_text:
-                    start_err = (start_proc.stderr or start_proc.stdout or '').strip()
-                    if start_err:
-                        print(f"Warning: Could not start Windows service '{service_name}': {start_err}")
-                    else:
-                        print(f"Warning: Could not start Windows service '{service_name}'.")
-                    return False
+            create_cmd = _windows_service_command(script, python_exe, cid)
+            if _legacy_windows_service_exists(service_name):
+                _remove_legacy_windows_service(service_name)
+            if not _register_windows_startup_task(service_name, create_cmd):
+                return False
         else:
             unit_name = f"{service_name}.service"
             unit_path = os.path.join('/etc/systemd/system', unit_name)
@@ -310,7 +331,7 @@ def _register_container_service(state):
 
         state['service_enabled'] = True
         state['service_name'] = service_name
-        state['service_platform'] = 'windows' if IS_WINDOWS else 'linux'
+        state['service_platform'] = 'windows-task' if IS_WINDOWS else 'linux'
         save_state(cid, state)
         print(f"Service mode enabled: {service_name}")
         return True
@@ -326,7 +347,10 @@ def _stop_container_service(state):
     service_name = state.get('service_name') or _container_service_name(state)
     try:
         if IS_WINDOWS:
-            subprocess.call(['sc', 'stop', service_name], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            if state.get('service_platform') == 'windows':
+                subprocess.call(['sc.exe', 'stop', service_name], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            else:
+                _stop_windows_startup_task(service_name)
         else:
             subprocess.call(['systemctl', 'stop', f"{service_name}.service"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except Exception:
@@ -340,8 +364,11 @@ def _remove_container_service(state):
     service_name = state.get('service_name') or _container_service_name(state)
     try:
         if IS_WINDOWS:
-            subprocess.call(['sc', 'stop', service_name], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            subprocess.call(['sc', 'delete', service_name], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            if state.get('service_platform') == 'windows':
+                _remove_legacy_windows_service(service_name)
+            else:
+                _stop_windows_startup_task(service_name)
+                _remove_windows_startup_task(service_name)
         else:
             unit_name = f"{service_name}.service"
             unit_path = os.path.join('/etc/systemd/system', unit_name)
