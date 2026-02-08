@@ -7,6 +7,50 @@ import time
 import yaml
 
 
+def _normalize_services(config):
+    services = config.get('services', {})
+    if services is None:
+        return {}
+    if not isinstance(services, dict):
+        raise click.UsageError("Invalid compose file: 'services' must be a mapping.")
+    return services
+
+
+def _service_start_order(services):
+    """Return service names in dependency order based on optional depends_on."""
+    pending = {name: svc or {} for name, svc in services.items()}
+    resolved = []
+
+    while pending:
+        progressed = False
+        for name in list(pending.keys()):
+            svc = pending[name]
+            deps = svc.get('depends_on', [])
+            if isinstance(deps, dict):
+                deps = list(deps.keys())
+            if not isinstance(deps, list):
+                raise click.UsageError(
+                    f"Invalid depends_on for service '{name}': expected list or mapping."
+                )
+
+            unknown = [dep for dep in deps if dep not in services]
+            if unknown:
+                raise click.UsageError(
+                    f"Service '{name}' depends on undefined service(s): {', '.join(unknown)}"
+                )
+
+            if all(dep in resolved for dep in deps):
+                resolved.append(name)
+                pending.pop(name)
+                progressed = True
+
+        if not progressed:
+            cycle = ", ".join(sorted(pending.keys()))
+            raise click.UsageError(f"Cyclic depends_on detected among: {cycle}")
+
+    return resolved
+
+
 def register_create_commands(
     cli,
     eng,
@@ -38,10 +82,15 @@ def register_create_commands(
             return print("YAML file not found.")
 
         with open(file, 'r') as f:
-            config = yaml.safe_load(f)
+            config = yaml.safe_load(f) or {}
 
         project_name = os.path.basename(os.getcwd()).lower().replace(' ', '')
-        services = config.get('services', {})
+        services = _normalize_services(config)
+        if not services:
+            return print("No services defined in compose file.")
+
+        ordered_services = _service_start_order(services)
+        container_ids = {}
 
         if remove_orphans:
             defined = {f"{project_name}_{name}" for name in services}
@@ -53,13 +102,17 @@ def register_create_commands(
 
         needs_monitor = False
 
-        for name, svc in services.items():
+        for name in ordered_services:
+            svc = services.get(name) or {}
             container_name = f"{project_name}_{name}"
             image_tag = svc.get('image', container_name)
 
             if 'build' in svc and build:
                 print(f"Building {name}...")
-                subprocess.call([sys.executable, sys.argv[0], "build", "-t", image_tag, svc.get('build', '.')])
+                rc = subprocess.call([sys.executable, sys.argv[0], "build", "-t", image_tag, svc.get('build', '.')])
+                if rc != 0:
+                    print(f"Error: build failed for {name} (exit code {rc}).")
+                    continue
 
             if not image_exists(image_tag):
                 print(f"Error: Build failed for {name}. Image not found. Skipping.")
@@ -84,13 +137,15 @@ def register_create_commands(
                     svc.get('ports', []),
                     svc.get('volumes', []),
                     svc.get('environment', []),
-                    True,
+                    detach,
                     None,
                     restart_policy=svc.get('restart', 'no'),
                     labels=svc.get('labels', {}),
                     network=svc.get('network', 'bridge')
                 )
                 print(f"Started {container_name}")
+
+            container_ids[name] = get_id_by_name(container_name)
 
             if svc.get('auto-update', {}).get('enabled'):
                 needs_monitor = True
@@ -100,14 +155,13 @@ def register_create_commands(
         hosts_map = {}
         for i in range(10):
             all_found = True
-            for name in services:
-                cname = f"{project_name}_{name}"
-                cid = get_id_by_name(cname)
+            for name in ordered_services:
+                cid = container_ids.get(name)
                 if cid:
                     ip = get_container_ip(cid)
                     if ip and ip != '127.0.0.1':
                         hosts_map[name] = ip
-                        hosts_map[cname] = ip
+                        hosts_map[f"{project_name}_{name}"] = ip
                     else:
                         all_found = False
             if all_found:
@@ -117,9 +171,8 @@ def register_create_commands(
                 print(".", end="", flush=True)
 
         print("\nInjecting DNS records...")
-        for name in services:
-            cname = f"{project_name}_{name}"
-            cid = get_id_by_name(cname)
+        for name in ordered_services:
+            cid = container_ids.get(name)
             if cid:
                 eng.inject_hosts(cid, hosts_map)
 
@@ -138,10 +191,11 @@ def register_create_commands(
                     startupinfo.dwFlags |= 1
                     startupinfo.wShowWindow = 0
 
+                creationflags = 0x00000200 if is_windows else 0
                 p = subprocess.Popen(
                     [sys.executable, sys.argv[0], "monitor-daemon", os.path.abspath(file), project_name],
                     cwd=install_dir,
-                    creationflags=0x00000200,
+                    creationflags=creationflags,
                     startupinfo=startupinfo,
                     close_fds=True
                 )
@@ -157,7 +211,7 @@ def register_create_commands(
         if not os.path.exists(file):
             return
         with open(file, 'r') as f:
-            config = yaml.safe_load(f)
+            config = yaml.safe_load(f) or {}
         project_name = os.path.basename(os.getcwd()).lower().replace(' ', '')
 
         pid_file = os.path.join(state_dir, f"monitor_{project_name}.pid")
@@ -171,7 +225,7 @@ def register_create_commands(
                 pass
             os.remove(pid_file)
 
-        services = config.get('services', {})
+        services = _normalize_services(config)
         for name in services:
             cname = f"{project_name}_{name}"
             if get_id_by_name(cname):
