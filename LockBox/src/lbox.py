@@ -212,7 +212,11 @@ def _register_container_service(state):
                 if create_proc.returncode != 0:
                     err_text = (create_proc.stderr or create_proc.stdout or '').strip()
                     if err_text:
-                        print(f"Warning: Could not create Windows service '{service_name}': {err_text}")
+                        if 'OPENSCMANAGER FAILED 5' in err_text.upper() or 'ACCESS IS DENIED' in err_text.upper():
+                            print(f"Warning: Windows service mode requires an elevated terminal (Admin). Service '{service_name}' not created.")
+                        else:
+                            print(f"Warning: Could not create Windows service '{service_name}': {err_text}")
+
                     else:
                         print(f"Warning: Could not create Windows service '{service_name}'.")
                     return False
@@ -317,16 +321,18 @@ def _remove_container_service(state):
 def get_container_ip(cid, log_file=None):
     if not cid: return None
 
-    # 1. Python Probe (Most reliable)
+    # 1. Fast IP probe (works even on minimal images without python3)
     try:
         if IS_WINDOWS:
-            # We explicitly ask for the non-localhost IP
-            cmd = ['wsl', '-d', cid, 'python3', '-c', 
-                   'import socket; print([ip for ip in socket.gethostbyname_ex(socket.gethostname())[2] if not ip.startswith("127.")][0])']
-            output = subprocess.check_output(cmd).decode().strip()
+            cmd = [
+                'wsl', '-d', cid, 'sh', '-c',
+                "hostname -i 2>/dev/null | awk '{for(i=1;i<=NF;i++) if ($i !~ /^127\./) {print $i; exit}}'",
+            ]
+            output = subprocess.check_output(cmd, stderr=subprocess.DEVNULL).decode().strip()
             if re.match(r"^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$", output):
                 return output
-    except: pass
+    except:
+        pass
 
     # 2. Raw ifconfig Parsing (Looking specifically for 172.x or 192.x)
     try:
