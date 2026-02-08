@@ -77,9 +77,36 @@ def remove_state(cid):
         if os.path.exists(os.path.join(STATE_DIR, f"{cid}.json")): os.remove(os.path.join(STATE_DIR, f"{cid}.json"))
     except: pass
 
+def remove_service_artifacts_by_container_name(name):
+    state = load_state(name)
+    if state:
+        _remove_container_service(state)
+        return
+
+    placeholder = {
+        "id": name,
+        "name": name,
+        "service_enabled": True,
+        "service_name": None,
+        "service_platform": "windows-task" if IS_WINDOWS else "linux",
+    }
+    _remove_container_service(placeholder)
+
+def _windows_hidden_process_kwargs():
+    if not IS_WINDOWS:
+        return {}
+
+    startupinfo = subprocess.STARTUPINFO()
+    startupinfo.dwFlags |= 1
+    startupinfo.wShowWindow = 0
+    return {
+        "startupinfo": startupinfo,
+        "creationflags": 0x08000000,
+    }
+
 def run_quiet(cmd_list):
     try:
-        subprocess.check_call(cmd_list, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.check_call(cmd_list, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, **_windows_hidden_process_kwargs())
         return True
     except: return False
 
@@ -207,7 +234,7 @@ def spawn_internal_daemon(cid, log_handle=None):
         startupinfo = subprocess.STARTUPINFO()
         startupinfo.dwFlags |= 1
         startupinfo.wShowWindow = 0
-        creationflags = 0x00000200
+        creationflags = 0x00000008 | 0x00000200 | 0x08000000
 
     proc = subprocess.Popen(
         [python_exe, script, "internal-daemon", cid],
@@ -1028,14 +1055,14 @@ def internal_daemon(cid):
                     wh = os.path.abspath(h).replace('\\','/')
                     drive, rest = os.path.splitdrive(wh)
                     if drive: wh = f"/mnt/{drive[0].lower()}{rest}"
-                    subprocess.call(['wsl', '-d', cid, 'sh', '-c', f'mkdir -p {c} && mount --bind "{wh}" "{c}"'])
+                    subprocess.call(['wsl', '-d', cid, 'sh', '-c', f'mkdir -p {c} && mount --bind "{wh}" "{c}"'], **_windows_hidden_process_kwargs())
 
                 for e in s.get('envs', []):
-                    subprocess.call(['wsl', '-d', cid, 'sh', '-c', f"echo 'export {e}' >> /etc/profile"])
+                    subprocess.call(['wsl', '-d', cid, 'sh', '-c', f"echo 'export {e}' >> /etc/profile"], **_windows_hidden_process_kwargs())
 
-                subprocess.call(['wsl', '-d', cid, 'sh', '-c', 'echo "nameserver 8.8.8.8" > /etc/resolv.conf'])
+                subprocess.call(['wsl', '-d', cid, 'sh', '-c', 'echo "nameserver 8.8.8.8" > /etc/resolv.conf'], **_windows_hidden_process_kwargs())
                 full_cmd = f"cd {workdir} && {cmd}"
-                exit_code = subprocess.call(['wsl', '-d', cid, 'sh', '-c', full_cmd])
+                exit_code = subprocess.call(['wsl', '-d', cid, 'sh', '-c', full_cmd], **_windows_hidden_process_kwargs())
             else:
                 mp = []
                 for v in s.get('volumes', []):
@@ -1303,6 +1330,7 @@ create = register_create_commands(
     get_container_ip,
     is_windows_admin,
     relaunch_self_as_admin,
+    remove_service_artifacts_by_container_name,
 )
 
 for c in [build, run, stop, restart, inspect, rm, exec, ps, images, logs, internal_daemon, monitor_daemon]:
