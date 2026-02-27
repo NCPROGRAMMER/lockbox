@@ -30,8 +30,9 @@ IMAGES_DIR = os.path.join(INSTALL_DIR, "images")
 CONTAINERS_DIR = os.path.join(INSTALL_DIR, "containers")
 STATE_DIR = os.path.join(INSTALL_DIR, "state")
 LOGS_DIR = os.path.join(INSTALL_DIR, "logs")
+VOLUMES_DIR = os.path.join(INSTALL_DIR, "volumes")
 
-for d in [IMAGES_DIR, CONTAINERS_DIR, STATE_DIR, LOGS_DIR]:
+for d in [IMAGES_DIR, CONTAINERS_DIR, STATE_DIR, LOGS_DIR, VOLUMES_DIR]:
     if not os.path.exists(d): os.makedirs(d)
 
 # ==========================================
@@ -551,6 +552,96 @@ def normalize_run_options(ports, volumes, envs):
         "envs": list(envs or [])
     }
 
+
+def _is_host_path_reference(value):
+    if not value:
+        return False
+    if value.startswith(('/', './', '../', '~')):
+        return True
+    if '\\' in value or '/' in value:
+        return True
+    if re.match(r'^[A-Za-z]:[\\/]', value):
+        return True
+    return False
+
+
+def _normalize_volume_name(value):
+    cleaned = re.sub(r'[^A-Za-z0-9_.-]+', '-', str(value or '').strip())
+    cleaned = cleaned.strip('-_.')
+    if not cleaned:
+        raise ValueError("Volume name cannot be empty.")
+    return cleaned
+
+
+def _parse_volume_entry(volume_entry):
+    if ':' not in volume_entry:
+        raise ValueError(f"Invalid volume '{volume_entry}'. Use SRC:DEST format.")
+
+    source, target = volume_entry.rsplit(':', 1)
+    source = source.strip()
+    target = target.strip()
+    if not source or not target:
+        raise ValueError(f"Invalid volume '{volume_entry}'. Use SRC:DEST format.")
+
+    if _is_host_path_reference(source):
+        host_path = os.path.abspath(os.path.expanduser(source))
+        os.makedirs(host_path, exist_ok=True)
+        return {
+            "raw": volume_entry,
+            "source": source,
+            "target": target,
+            "type": "bind",
+            "host_path": host_path,
+            "name": None,
+        }
+
+    volume_name = _normalize_volume_name(source)
+    host_path = os.path.join(VOLUMES_DIR, volume_name)
+    os.makedirs(host_path, exist_ok=True)
+    return {
+        "raw": volume_entry,
+        "source": source,
+        "target": target,
+        "type": "named",
+        "host_path": host_path,
+        "name": volume_name,
+    }
+
+
+def resolve_volume_bindings(volumes):
+    bindings = []
+    for entry in volumes or []:
+        bindings.append(_parse_volume_entry(entry))
+    return bindings
+
+
+def remove_named_volume(volume_name):
+    normalized = _normalize_volume_name(volume_name)
+    path = os.path.join(VOLUMES_DIR, normalized)
+    if not os.path.exists(path):
+        return False
+    shutil.rmtree(path, ignore_errors=True)
+    return True
+
+
+def list_named_volumes():
+    if not os.path.exists(VOLUMES_DIR):
+        return []
+    return sorted([entry.name for entry in os.scandir(VOLUMES_DIR) if entry.is_dir()])
+
+def _resolve_project_service_volumes(project_name, volumes):
+    resolved = []
+    for volume_entry in volumes or []:
+        if ':' not in volume_entry:
+            resolved.append(volume_entry)
+            continue
+        source, target = volume_entry.rsplit(':', 1)
+        source = source.strip()
+        if source and not _is_host_path_reference(source):
+            source = f"{project_name}_{source}"
+        resolved.append(f"{source}:{target.strip()}")
+    return resolved
+
 def handle_connection_retry(client, ip, port, log_file):
     target = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     connected = False
@@ -713,9 +804,10 @@ class WindowsEngine:
             subprocess.check_call(['wsl', '--import', cid, root, img_path], stdout=subprocess.DEVNULL)
             time.sleep(2.0)
 
+            resolved_volumes = resolve_volume_bindings(volumes)
             state = {
                 "id": cid, "name": name, "image": image, "status": "starting", 
-                "ports": ports, "volumes": volumes, "envs": envs, 
+                "ports": ports, "volumes": volumes, "volume_bindings": resolved_volumes, "envs": envs, 
                 "command": cmd,
                 "workdir": workdir,
                 "created": datetime.now().isoformat(),
@@ -932,9 +1024,10 @@ class LinuxEngine:
         try:
             with tarfile.open(img_path) as t: t.extractall(root)
             with open(os.path.join(root, 'etc/resolv.conf'), 'w') as f: f.write("nameserver 8.8.8.8\\n")
+            resolved_volumes = resolve_volume_bindings(volumes)
             state = {
                 "id": cid, "name": name, "image": image, "status": "starting",
-                "ports": ports, "volumes": volumes, "envs": envs,
+                "ports": ports, "volumes": volumes, "volume_bindings": resolved_volumes, "envs": envs,
                 "command": cmd,
                 "workdir": workdir,
                 "created": datetime.now().isoformat(),
@@ -1054,10 +1147,16 @@ def internal_daemon(cid):
             print(f"[Daemon] WorkDir: {workdir}")
             print(f"[Daemon] Running: {cmd}")
 
+            volume_bindings = s.get('volume_bindings')
+            if not volume_bindings:
+                volume_bindings = resolve_volume_bindings(s.get('volumes', []))
+                s['volume_bindings'] = volume_bindings
+                save_state(cid, s)
+
             if IS_WINDOWS:
-                for v in s.get('volumes', []):
-                    h, c = v.rsplit(':', 1)
-                    wh = os.path.abspath(h).replace('\\','/')
+                for binding in volume_bindings:
+                    c = binding['target']
+                    wh = binding['host_path'].replace('\\','/')
                     drive, rest = os.path.splitdrive(wh)
                     if drive: wh = f"/mnt/{drive[0].lower()}{rest}"
                     subprocess.call(['wsl', '-d', cid, 'sh', '-c', f'mkdir -p {c} && mount --bind "{wh}" "{c}"'], **_windows_hidden_process_kwargs())
@@ -1070,8 +1169,9 @@ def internal_daemon(cid):
                 exit_code = subprocess.call(['wsl', '-d', cid, 'sh', '-c', full_cmd], **_windows_hidden_process_kwargs())
             else:
                 mp = []
-                for v in s.get('volumes', []):
-                    h, c = v.rsplit(':', 1)
+                for binding in volume_bindings:
+                    h = binding['host_path']
+                    c = binding['target']
                     t = os.path.join(s['root'], c.lstrip('/'))
                     os.makedirs(t, exist_ok=True)
                     subprocess.call(['mount', '--bind', h, t])
@@ -1193,7 +1293,7 @@ def monitor_daemon(config_path, project_name):
                     eng.rm(container_name)
 
                     ports = svc.get('ports', [])
-                    vols = svc.get('volumes', [])
+                    vols = _resolve_project_service_volumes(project_name, svc.get('volumes', []))
                     envs = svc.get('environment', [])
 
                     eng.run(
@@ -1308,7 +1408,35 @@ def inspect(identifier):
 
 @click.command()
 @click.argument('identifier')
-def rm(identifier): eng.rm(identifier)
+@click.argument('extra', nargs=-1)
+@click.option('--all', 'remove_all_volumes', is_flag=True, help='When removing volumes, remove all named volumes.')
+def rm(identifier, extra, remove_all_volumes):
+    if identifier == 'volumes':
+        targets = list(extra)
+        if remove_all_volumes:
+            removed = 0
+            for volume_name in list_named_volumes():
+                if remove_named_volume(volume_name):
+                    print(f"Removed volume {volume_name}")
+                    removed += 1
+            if removed == 0:
+                print("No named volumes found.")
+            return
+
+        if not targets:
+            return print("Usage: lbox rm volumes <name...> [--all]")
+
+        for volume_name in targets:
+            try:
+                if remove_named_volume(volume_name):
+                    print(f"Removed volume {volume_name}")
+                else:
+                    print(f"Volume '{volume_name}' not found.")
+            except ValueError as exc:
+                print(f"Invalid volume name '{volume_name}': {exc}")
+        return
+
+    eng.rm(identifier)
 
 @click.command()
 @click.argument('identifier')
@@ -1329,6 +1457,14 @@ def images():
     for f in os.listdir(IMAGES_DIR):
         if f.endswith('.tar') or f.endswith('.tar.gz'): print(f)
 
+@click.command()
+def volumes():
+    names = list_named_volumes()
+    if not names:
+        return print("No named volumes.")
+    for name in names:
+        print(name)
+
 create = register_create_commands(
     cli,
     eng,
@@ -1343,9 +1479,11 @@ create = register_create_commands(
     is_windows_admin,
     relaunch_self_as_admin,
     remove_service_artifacts_by_container_name,
+    remove_named_volume,
+    list_named_volumes,
 )
 
-for c in [build, run, stop, restart, inspect, rm, exec, ps, images, logs, internal_daemon, monitor_daemon]:
+for c in [build, run, stop, restart, inspect, rm, exec, ps, images, volumes, logs, internal_daemon, monitor_daemon]:
     cli.add_command(c)
 
 if __name__ == '__main__': cli()

@@ -10,6 +10,7 @@ This demo shows how to run a **Flask web application backed by Redis** using **L
 
 - Building images from local `app.lbox` files  
 - Running multiple services (web + redis) with `lockbox-create.yml`  
+- Named volumes that persist across container/image removal  
 - Port forwarding from containers to the host  
 - Absolute-path container startup (**required for LockBox v4.7+**)
 - Health endpoint (`/healthz`) for quick service checks
@@ -117,6 +118,11 @@ This will stop and remove:
 - The Redis container
 - The auto-update monitor (if enabled)
 
+By default, named volumes persist. Add `-v` to remove project volumes:
+```bash
+lbox create down -v
+```
+
 ---
 
 ## 🔧 LockBox Command Reference
@@ -129,7 +135,8 @@ This will stop and remove:
 | `lbox run <image>` | Run a container from an image |
 | `lbox run --name <name>` | Run a container with a fixed name |
 | `lbox run -p HOST:CONT` | Publish a port |
-| `lbox run -v HOST:CONT` | Bind-mount a volume |
+| `lbox run -v HOST:CONT` | Bind-mount a host directory |
+| `lbox run -v NAME:CONT` | Mount a named volume stored under `LockBox/volumes/NAME` |
 | `lbox run -e VAR=value` | Set environment variables |
 | `lbox run -d` | Run container in detached mode |
 | `lbox run --restart <policy>` | Restart policy: `no`, `always`, `on-failure`, `unless-stopped` |
@@ -138,6 +145,9 @@ This will stop and remove:
 | `lbox run --service` | Register container as a host-managed service (systemd on Linux, Service Control Manager on Windows) |
 | `lbox stop <id|name>` | Stop a running container |
 | `lbox rm <id|name>` | Remove a container |
+| `lbox volumes` | List named volumes |
+| `lbox rm volumes <name...>` | Remove specific named volumes |
+| `lbox rm volumes --all` | Remove all named volumes |
 | `lbox restart <id|name>` | Recreate and restart a container using saved config |
 | `lbox inspect <id|name>` | Show full container metadata as JSON |
 | `lbox exec <id|name> "<cmd>"` | Execute a command inside a container |
@@ -159,6 +169,9 @@ This will stop and remove:
 | `lbox create up --remove-orphans` | Remove project containers missing from compose file |
 | `lbox create up --service` | Run project service containers as host-managed services |
 | `lbox create down` | Stop and remove all services |
+| `lbox create down -v` | Stop/remove services and remove project named volumes |
+| `lbox create rm volumes` | Remove named volumes declared by compose file |
+| `lbox create rm volumes --all` | Remove all LockBox named volumes |
 | `lbox create down --rmi all` | Also remove all service images |
 | `lbox create down --rmi local` | Remove only images built from `build:` definitions |
 | `lbox create up -f file.yml` | Use a custom compose file |
@@ -167,6 +180,7 @@ This will stop and remove:
 - Builds missing images
 - Starts services in dependency order
 - Applies ports, volumes, and environment variables
+- Creates named volumes in `LockBox/volumes` (compose-style names are project-prefixed)
 - Optionally launches the auto-update monitor
 
 ---
