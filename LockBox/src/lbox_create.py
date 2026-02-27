@@ -120,6 +120,8 @@ def register_create_commands(
     remove_service_artifacts_by_container_name,
     remove_named_volume,
     list_named_volumes,
+    find_container_conflicts,
+    format_conflict_error,
 ):
     @cli.group()
     def create():
@@ -191,6 +193,21 @@ def register_create_commands(
 
         ordered_services = _service_start_order(services)
         container_ids = {}
+
+        # Pre-flight conflict check: fail early before creating any containers.
+        for name in ordered_services:
+            svc = services.get(name) or {}
+            container_name = f"{project_name}_{name}"
+            ignore_names = [container_name] if force_recreate else None
+            conflicts = find_container_conflicts(
+                requested_name=container_name,
+                requested_ports=svc.get('ports', []),
+                ignore_names=ignore_names,
+            )
+            if conflicts.get('name') or conflicts.get('ports'):
+                raise click.ClickException(
+                    format_conflict_error(f"run create up for service '{name}'", conflicts)
+                )
 
         if remove_orphans:
             defined = {f"{project_name}_{name}" for name in services}

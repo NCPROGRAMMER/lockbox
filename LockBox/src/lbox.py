@@ -174,6 +174,102 @@ def check_port_free(port):
         return True
     except OSError: return False
 
+
+def _extract_host_port(port_mapping):
+    """Return host port from a container port mapping, or None if unavailable."""
+    if port_mapping is None:
+        return None
+
+    if isinstance(port_mapping, int):
+        return port_mapping
+
+    raw = str(port_mapping).strip()
+    if not raw:
+        return None
+
+    candidate = raw.split('/')[0]
+    parts = candidate.split(':')
+
+    if len(parts) == 1:
+        host_port = parts[0]
+    else:
+        host_port = parts[-2]
+
+    try:
+        return int(host_port)
+    except (TypeError, ValueError):
+        return None
+
+
+def find_container_conflicts(requested_name=None, requested_ports=None, ignore_names=None):
+    """Detect conflicts with existing LockBox states by container name or host ports."""
+    ignore_names = set(ignore_names or [])
+    requested_ports = requested_ports or []
+    requested_host_ports = sorted(
+        {
+            hp for hp in (_extract_host_port(p) for p in requested_ports)
+            if hp is not None
+        }
+    )
+
+    conflicts = {"name": None, "ports": []}
+    for state in iter_states():
+        state_name = state.get('name')
+        if state_name in ignore_names:
+            continue
+
+        if requested_name and state_name == requested_name:
+            conflicts['name'] = {
+                'requested_name': requested_name,
+                'existing_id': state.get('id'),
+                'status': state.get('status', 'unknown')
+            }
+
+        existing_ports = state.get('ports') or []
+        existing_host_ports = {
+            hp for hp in (_extract_host_port(p) for p in existing_ports)
+            if hp is not None
+        }
+
+        overlap = sorted(set(requested_host_ports) & existing_host_ports)
+        if overlap:
+            conflicts['ports'].append({
+                'container_name': state_name or state.get('id'),
+                'container_id': state.get('id'),
+                'status': state.get('status', 'unknown'),
+                'ports': overlap,
+            })
+
+    return conflicts
+
+
+def format_conflict_error(action_name, conflicts):
+    """Build a user-friendly conflict error message."""
+    details = []
+
+    name_conflict = conflicts.get('name')
+    if name_conflict:
+        details.append(
+            "- Name conflict: requested container "
+            f"'{name_conflict['requested_name']}' already exists "
+            f"(id={name_conflict.get('existing_id')}, status={name_conflict.get('status')})."
+        )
+
+    for port_conflict in conflicts.get('ports', []):
+        ports = ', '.join(str(p) for p in port_conflict['ports'])
+        details.append(
+            "- Port conflict: host port(s) "
+            f"{ports} already assigned to '{port_conflict['container_name']}' "
+            f"(id={port_conflict.get('container_id')}, status={port_conflict.get('status')})."
+        )
+
+    joined = "\n".join(details)
+    return (
+        f"Error: Cannot {action_name} due to container conflicts.\n"
+        f"{joined}\n"
+        "Resolve the conflict by removing/recreating the existing container or choosing a different name/port."
+    )
+
 def calculate_file_hash(filepath):
     if not os.path.exists(filepath): return None
     hash_md5 = hashlib.md5()
@@ -777,12 +873,11 @@ class WindowsEngine:
 
     def run(self, image, name, ports, volumes, envs, detach, cmd, restart_policy="no", labels=None, network="bridge", as_service=False):
         self.check_reqs()
-        if name and get_id_by_name(name): 
-            print(f"Note: Container '{name}' already exists. Skipping.")
-            return
 
         for p in ports:
-            if not check_port_free(int(p.split(':')[0])): return print(f"Error: Port {p} taken.")
+            host_port = _extract_host_port(p)
+            if host_port is not None and not check_port_free(host_port):
+                return print(f"Error: Host port {host_port} is already in use by another process.")
 
         img_path = os.path.join(IMAGES_DIR, f"{image}.tar")
         if not os.path.exists(img_path): return print(f"Error: Image '{image}' not found.")
@@ -1002,9 +1097,10 @@ class LinuxEngine:
 
     def run(self, image, name, ports, volumes, envs, detach, cmd, restart_policy="no", labels=None, network="bridge", as_service=False):
         self.check_reqs()
-        if name and get_id_by_name(name): return print(f"Error: Name '{name}' taken.")
         for p in ports:
-            if not check_port_free(int(p.split(':')[0])): return print(f"Error: Port {p} taken.")
+            host_port = _extract_host_port(p)
+            if host_port is not None and not check_port_free(host_port):
+                return print(f"Error: Host port {host_port} is already in use by another process.")
 
         img_path = os.path.join(IMAGES_DIR, f"{image}.tar")
         if not os.path.exists(img_path): return print("Image missing.")
@@ -1358,6 +1454,10 @@ def run(image, name, port, volume, env, detach, restart, label, network, service
         relaunch_self_as_admin()
         return
 
+    conflicts = find_container_conflicts(requested_name=name, requested_ports=port)
+    if conflicts.get('name') or conflicts.get('ports'):
+        raise click.ClickException(format_conflict_error('run container', conflicts))
+
     labels = parse_env_entries(label)
     eng.run(image, name, port, volume, env, detach, cmd, restart_policy=restart, labels=labels, network=network, as_service=service)
 
@@ -1481,6 +1581,8 @@ create = register_create_commands(
     remove_service_artifacts_by_container_name,
     remove_named_volume,
     list_named_volumes,
+    find_container_conflicts,
+    format_conflict_error,
 )
 
 for c in [build, run, stop, restart, inspect, rm, exec, ps, images, volumes, logs, internal_daemon, monitor_daemon]:
