@@ -63,6 +63,47 @@ def _service_start_order(services):
     return resolved
 
 
+
+def _is_host_path_reference(value):
+    if not value:
+        return False
+    if value.startswith(('/', './', '../', '~')):
+        return True
+    if '\\' in value or '/' in value:
+        return True
+    import re
+    if re.match(r'^[A-Za-z]:[\\/]', value):
+        return True
+    return False
+
+
+def _project_named_volumes(project_name, services):
+    volumes = set()
+    for svc in (services or {}).values():
+        for volume in (svc or {}).get('volumes', []) or []:
+            if ':' not in volume:
+                continue
+            source, _ = volume.rsplit(':', 1)
+            source = source.strip()
+            if not source or _is_host_path_reference(source):
+                continue
+            volumes.add(f"{project_name}_{source}")
+    return sorted(volumes)
+
+
+def _resolve_service_volumes(project_name, service_volumes):
+    resolved = []
+    for volume in service_volumes or []:
+        if ':' not in volume:
+            resolved.append(volume)
+            continue
+        source, target = volume.rsplit(':', 1)
+        source = source.strip()
+        if source and not _is_host_path_reference(source):
+            source = f"{project_name}_{source}"
+        resolved.append(f"{source}:{target.strip()}")
+    return resolved
+
 def register_create_commands(
     cli,
     eng,
@@ -77,12 +118,50 @@ def register_create_commands(
     is_windows_admin,
     relaunch_self_as_admin,
     remove_service_artifacts_by_container_name,
+    remove_named_volume,
+    list_named_volumes,
     find_container_conflicts,
     format_conflict_error,
 ):
     @cli.group()
     def create():
         """Manage multi-container projects from lockbox-create.yml."""
+
+    @create.group(name='rm')
+    def create_rm():
+        """Remove project resources such as named volumes."""
+
+    @create_rm.command(name='volumes')
+    @click.option('--file', '-f', default='lockbox-create.yml')
+    @click.option('--all', 'remove_all', is_flag=True, help='Remove all named volumes managed by LockBox.')
+    @click.argument('names', nargs=-1)
+    def rm_volumes(file, remove_all, names):
+        if remove_all:
+            removed = 0
+            for volume_name in list_named_volumes():
+                if remove_named_volume(volume_name):
+                    print(f"Removed volume {volume_name}")
+                    removed += 1
+            if removed == 0:
+                print("No named volumes found.")
+            return
+
+        target_names = list(names)
+        if file and os.path.exists(file):
+            with open(file, 'r') as f:
+                config = yaml.safe_load(f) or {}
+            project_name = os.path.basename(os.getcwd()).lower().replace(' ', '')
+            services = _normalize_services(config)
+            target_names.extend(_project_named_volumes(project_name, services))
+
+        if not target_names:
+            return print("No volumes specified. Use names, --file, or --all.")
+
+        for volume_name in sorted(set(target_names)):
+            if remove_named_volume(volume_name):
+                print(f"Removed volume {volume_name}")
+            else:
+                print(f"Volume '{volume_name}' not found.")
 
     @create.command()
     @click.option('--file', '-f', default='lockbox-create.yml')
@@ -173,7 +252,7 @@ def register_create_commands(
                     image_tag,
                     container_name,
                     svc.get('ports', []),
-                    svc.get('volumes', []),
+                    _resolve_service_volumes(project_name, svc.get('volumes', [])),
                     svc.get('environment', []),
                     detach,
                     None,
@@ -251,7 +330,8 @@ def register_create_commands(
     @click.option('--file', '-f', default='lockbox-create.yml')
     @click.option('--rmi', type=click.Choice(['none', 'local', 'all']), default='none', show_default=True, help='Remove images used by services.')
     @click.option('--remove-orphans', is_flag=True, help='Remove containers for this project that are not defined in the compose file.')
-    def down(file, rmi, remove_orphans):
+    @click.option('--volumes', '-v', is_flag=True, help='Remove named volumes declared by this compose project.')
+    def down(file, rmi, remove_orphans, volumes):
         if not os.path.exists(file):
             return
         with open(file, 'r') as f:
@@ -299,5 +379,10 @@ def register_create_commands(
                 image_tag = svc.get('image', f"{project_name}_{name}")
                 if remove_image_artifacts(image_tag):
                     print(f"Removed image {image_tag}")
+
+        if volumes:
+            for volume_name in _project_named_volumes(project_name, services):
+                if remove_named_volume(volume_name):
+                    print(f"Removed volume {volume_name}")
 
     return create
