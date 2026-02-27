@@ -1,5 +1,6 @@
 BOX_BASE alpine
 # Actually install the Redis Server software
 BOX_EXEC apk add --no-cache redis
-# Run Redis in the foreground (no daemonize) so LockBox can track container state
-BOX_START ["redis-server", "--protected-mode", "no", "--daemonize", "no"]
+# Run Redis in the foreground (no daemonize) so LockBox can track container state.
+# Enable AOF persistence so counter updates survive stop/down + later up cycles.
+BOX_START ["redis-server", "--protected-mode", "no", "--daemonize", "no", "--appendonly", "yes"]
