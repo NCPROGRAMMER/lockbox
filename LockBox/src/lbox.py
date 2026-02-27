@@ -319,6 +319,7 @@ def cleanup_container_resources(state):
     root = state.get('root')
 
     if IS_WINDOWS and cid:
+        _graceful_windows_shutdown(cid, timeout_s=2)
         run_quiet(['wsl', '--terminate', cid])
         run_quiet(['wsl', '--unregister', cid])
     else:
@@ -355,6 +356,20 @@ def spawn_internal_daemon(cid, log_handle=None):
         stderr=subprocess.STDOUT if log_handle else subprocess.DEVNULL
     )
     return proc
+
+def _graceful_windows_shutdown(cid, timeout_s=8):
+    """Best-effort graceful shutdown before forcing WSL termination."""
+    if not IS_WINDOWS or not cid:
+        return
+
+    # Ask processes to flush/exit first (important for stateful services like Redis).
+    subprocess.call([
+        'wsl', '-d', cid, 'sh', '-c',
+        'sync >/dev/null 2>&1 || true; kill -TERM -1 >/dev/null 2>&1 || true'
+    ], **_windows_hidden_process_kwargs())
+
+    # Give processes a short window to handle SIGTERM and flush data.
+    time.sleep(max(0, timeout_s))
 
 def _normalize_service_name(value):
     cleaned = re.sub(r'[^A-Za-z0-9_.-]+', '-', str(value or '').strip())
@@ -966,6 +981,7 @@ class WindowsEngine:
         if not s: return print("Not found.")
         cid = s['id']
         _stop_container_service(s)
+        _graceful_windows_shutdown(cid)
         run_quiet(['wsl', '--terminate', cid])
         s['status'] = 'exited'
         save_state(cid, s)
